@@ -275,14 +275,9 @@ mod tests {
         )
         .unwrap();
 
-        let file = std::env::temp_dir().join(format!("yummywatch-{}.y4m", crate::alloha::token()));
-        let mut video = b"YUV4MPEG2 W32 H16 F10:1 Ip A1:1 C420jpeg\n".to_vec();
-        for index in 0..30 {
-            video.extend_from_slice(b"FRAME\n");
-            video.extend([if index < 10 { 64 } else { 186 }; 32 * 16]);
-            video.extend([128; 16 * 8 * 2]);
-        }
-        std::fs::write(&file, video).unwrap();
+        let file = std::env::temp_dir().join(format!("yummywatch-{}.mp4", crate::alloha::token()));
+        // The H.264 picture changes from dark to bright after the first second.
+        std::fs::write(&file, include_bytes!("fixtures/playback.mp4")).unwrap();
         let path = CString::new(file.to_str().unwrap()).unwrap();
         let mut player = mpv::Player::open(api, &path, None, 0.0, false, true).unwrap();
 

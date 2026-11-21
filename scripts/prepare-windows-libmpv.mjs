@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, mkdtemp, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,19 @@ const exists = path =>
     info => info.isFile(),
     () => false
   );
+
+const checksums = join(output, 'SHA256SUMS.txt');
+if (await exists(checksums)) {
+  const manifest = await readFile(checksums, 'utf8');
+  const expected = await Promise.all(
+    [dll, 'LICENSE.LGPL', 'SOURCE.txt'].map(async name => {
+      return `${await digest(join(output, name))}  ${name}`;
+    })
+  );
+  if (manifest.trim().replaceAll('\r\n', '\n') !== expected.join('\n'))
+    throw new Error('Unexpected checksum for locally built Windows libmpv');
+  process.exit(0);
+}
 
 if (
   (await exists(join(output, 'SOURCE.txt'))) &&

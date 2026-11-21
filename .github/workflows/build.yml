@@ -17,8 +17,37 @@ env:
   VITE_YUMMY_APPLICATION_TOKEN: ${{ secrets.YUMMY_APPLICATION_TOKEN }}
   VITE_DISCORD_APPLICATION_ID: ${{ secrets.DISCORD_APPLICATION_ID }}
 jobs:
+  windows-libmpv:
+    name: Build Windows libmpv
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: libmpv-cache
+        with:
+          path: src-tauri/native-libs/windows
+          key: windows-libmpv-ubuntu24-x64-${{ hashFiles('packaging/windows/build-libmpv.sh') }}
+      - name: Install Windows cross-compiler and build tools
+        if: steps.libmpv-cache.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix cmake meson ninja-build nasm gperf python3-jinja2
+      - name: Build compact Windows libmpv
+        if: steps.libmpv-cache.outputs.cache-hit != 'true'
+        run: bash packaging/windows/build-libmpv.sh src-tauri/native-libs/windows
+      - name: Verify the Windows bundle
+        working-directory: src-tauri/native-libs/windows
+        run: sha256sum --check SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-libmpv
+          path: src-tauri/native-libs/windows/*
+          if-no-files-found: error
+          retention-days: 1
+
   desktop:
     name: ${{ matrix.platform }}
+    needs: windows-libmpv
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -70,6 +99,11 @@ jobs:
           # Reuse both architecture caches from the initial universal build.
           key: ${{ runner.os == 'macOS' && 'macos-universal' || matrix.platform }}
       - run: npm ci
+      - uses: actions/download-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: windows-libmpv
+          path: src-tauri/native-libs/windows
       - name: Prepare Windows libmpv
         if: runner.os == 'Windows'
         run: node scripts/prepare-windows-libmpv.mjs

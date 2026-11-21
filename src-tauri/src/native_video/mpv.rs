@@ -69,6 +69,7 @@ pub(super) fn windows_api(path: &Path) -> Result<&'static Api, String> {
 const FLAG: c_int = 3;
 const INT64: c_int = 4;
 const DOUBLE: c_int = 5;
+const OPTION_NOT_FOUND: c_int = -5;
 const EVENT_NONE: c_int = 0;
 const EVENT_END_FILE: c_int = 7;
 const EVENT_FILE_LOADED: c_int = 8;
@@ -199,12 +200,17 @@ impl Player {
         let result = unsafe {
             (self.api.mpv_set_option_string)(self.handle.as_ptr(), name.as_ptr(), value.as_ptr())
         };
-        (result >= 0).then_some(()).ok_or_else(|| {
-            format!(
-                "Не удалось задать параметр libmpv {} ({result}).",
-                name.to_string_lossy()
-            )
-        })
+        // The bundled LGPL build can omit script support entirely.
+        let absent_script_option =
+            result == OPTION_NOT_FOUND && (name == c"ytdl" || name == c"load-scripts");
+        (result >= 0 || absent_script_option)
+            .then_some(())
+            .ok_or_else(|| {
+                format!(
+                    "Не удалось задать параметр libmpv {} ({result}).",
+                    name.to_string_lossy()
+                )
+            })
     }
 
     fn command(&self, values: &[&CStr]) -> bool {
