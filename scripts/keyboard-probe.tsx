@@ -1,7 +1,7 @@
 import { AppLink } from '~/ui/AppLink';
 // Real keyboard handlers and CSS, with deterministic content and no network dependencies.
 import { render } from 'preact';
-import { useLayoutEffect, useState } from 'preact/hooks';
+import { useState } from 'preact/hooks';
 import { useHash } from '~/lib/hooks';
 import { InterfaceEffects } from '~/components/InterfaceEffects';
 import { MediaNavigation } from '~/components/MediaNavigation';
@@ -13,17 +13,13 @@ function Probe() {
   const path = useHash(),
     [open, setOpen] = useState(false);
 
-  useLayoutEffect(() => {
-    document.getElementById('main')?.focus({ preventScroll: true });
-  }, [path]);
-
   return (
     <div class="media-app">
       <InterfaceEffects
+        path={path}
         onBack={() => {
           location.hash = '/';
         }}
-        watching={false}
       />
       <MediaNavigation path={path} selected={path} />
       <div class="workspace media-workspace">

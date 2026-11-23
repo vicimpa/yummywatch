@@ -9,11 +9,14 @@ export const isDesktop = () => isTauri();
 
 export interface DesktopInfo {
   platform: 'macos' | 'windows' | 'linux' | 'android' | 'ios';
+  nativeMpv?: boolean;
 }
 
 export const isDesktopWindow = () => isDesktop() && !document.documentElement.dataset.mobile;
 
 let desktop: DesktopInfo | undefined;
+
+export const hasAndroidMpv = () => desktop?.platform === 'android' && desktop.nativeMpv === true;
 
 export function desktopMediaRoot() {
   const url = new URL(convertFileSrc('', 'yumiwatch-media'));
@@ -59,6 +62,13 @@ export function handleDesktopLinkClick(event: MouseEvent) {
 
 export async function initializeDesktop() {
   if (!isDesktop()) return;
+  if (/\bYummyWatchTV\b/.test(navigator.userAgent)) {
+    Object.assign(document.documentElement.dataset, {
+      tv: 'true',
+      motion: 'off',
+      inputMode: 'keyboard',
+    });
+  }
 
   // Set the inset before the first paint, including the startup/error screen.
   const mobile = /Android/i.test(navigator.userAgent)

@@ -2,8 +2,10 @@ import { AppLink } from '~/ui/AppLink';
 import type { ComponentChildren, FunctionalComponent as FC } from 'preact';
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 
+import { downloadsAvailable } from '~/lib/downloads';
 import { useMediaQuery, useSession } from '~/lib/hooks';
 import { focusTarget, keyboardTargets } from '~/lib/keyboard-navigation';
+import { isTvMode } from '~/lib/tv-mode';
 import { social } from '~/lib/social';
 import { UnreadBadge } from './Social';
 
@@ -15,6 +17,7 @@ const sections: { href: string; icon: IconName; title: string }[] = [
   { href: '/search', icon: 'search', title: 'Поиск' },
   { href: '/schedule', icon: 'calendar', title: 'Расписание' },
 ];
+const downloadsSection = { href: '/downloads', icon: 'download' as const, title: 'Загрузки' };
 const phoneSections = [
   ...sections.filter(section => section.href !== '/catalog'),
   { href: '/profile', icon: 'user' as const, title: 'Профиль' },
@@ -35,10 +38,13 @@ export const MediaNavigation: FC<TMediaNavigationProps> = ({
   history,
   updateNotice,
 }) => {
-  const mobile = useMediaQuery('(max-width: 760px), (max-width: 1000px) and (pointer: coarse)'),
+  const narrow = useMediaQuery('(max-width: 760px), (max-width: 1000px) and (pointer: coarse)'),
+    mobile = narrow && !isTvMode(),
     session = useSession(),
     [open, setOpen] = useState(false);
   const root = useRef<HTMLElement>(null);
+  const showDownloads = downloadsAvailable();
+  const downloadsSelected = selected === '/downloads' || selected.startsWith('/downloads/');
 
   useEffect(() => setOpen(false), [path]);
 
@@ -68,17 +74,22 @@ export const MediaNavigation: FC<TMediaNavigationProps> = ({
         </span>
       </AppLink>
       <nav class="media-navigation" aria-label="Разделы медиакаталога">
-        {sections.map(section => (
-          <AppLink
-            key={section.href}
-            href={`#${section.href}`}
-            class={selected === section.href ? 'active' : ''}
-            aria-current={selected === section.href ? 'page' : undefined}
-          >
-            <Icon name={section.icon} size={22} />
-            <span>{section.title}</span>
-          </AppLink>
-        ))}
+        {(showDownloads ? [...sections, downloadsSection] : sections).map(section => {
+          const active =
+            section === downloadsSection ? downloadsSelected : selected === section.href;
+
+          return (
+            <AppLink
+              key={section.href}
+              href={`#${section.href}`}
+              class={active ? 'active' : ''}
+              aria-current={active ? 'page' : undefined}
+            >
+              <Icon name={section.icon} size={22} />
+              <span>{section.title}</span>
+            </AppLink>
+          );
+        })}
       </nav>
       <div class="media-system-links">
         {session && (
@@ -149,6 +160,18 @@ export const MediaNavigation: FC<TMediaNavigationProps> = ({
           <img src={`${import.meta.env.BASE_URL}icons/icon.svg`} width="30" height="30" alt="" />
           Yummy<span>Watch</span>
         </AppLink>
+        {showDownloads && (
+          <ButtonLink
+            href="#/downloads"
+            variant="icon"
+            aria-label="Загрузки"
+            aria-current={downloadsSelected ? 'page' : undefined}
+            title="Загрузки"
+            class="phone-downloads"
+          >
+            <Icon name="download" size={22} />
+          </ButtonLink>
+        )}
         {session && (
           <ButtonLink
             href="#/notifications"

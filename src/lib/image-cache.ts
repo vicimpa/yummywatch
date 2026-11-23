@@ -1,4 +1,4 @@
-import { getCache, hasCache, putCache } from './cache-store';
+import { clearedAt, getCache, hasCache, putCache } from './cache-store';
 import { desktopInvoke, isDesktop } from './desktop';
 
 const urls = new Map<string, { blob: Blob; url: string }>(),
@@ -80,6 +80,7 @@ export function subscribeImage(url: string, listener: () => void) {
 }
 
 export function storeWatchFrame(key: string, image: Blob, savedAt: number) {
+  if (savedAt < clearedAt.frame) return;
   putCache('frame', key, image, savedAt);
   for (const listener of listeners.get(key) || []) listener();
 }
@@ -109,6 +110,7 @@ export async function posterBlob(url: string): Promise<Blob> {
 }
 
 async function execute(request: ImageRequest) {
+  const started = Date.now();
   try {
     const blob = await fetchImage(request.url);
 
@@ -123,7 +125,7 @@ async function execute(request: ImageRequest) {
 
       same = new Uint8Array(a).every((value, index) => value === bytes[index]);
     }
-    if (!same) {
+    if (!same && started >= clearedAt.image) {
       putCache('image', request.url, blob);
       for (const listener of listeners.get(request.url) || []) listener();
     }

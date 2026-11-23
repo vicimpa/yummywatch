@@ -1,10 +1,11 @@
 import type { SkipKind } from '../../shared/skips.mjs';
 
-import { recordWatch } from './library';
+import { recordWatch, watchActivity } from './library';
 import { savePlaybackRecovery } from './playback-recovery';
 import { groupKey } from './player';
 import { getSession } from './session';
 import type { Stream } from './streams';
+import { trackVoice, type VoiceChoice } from './voice-ranking';
 import type { Anime, Video, WatchEntry } from './types';
 
 export const PLAYER_EVENT = 'yumiwatch:playback';
@@ -34,6 +35,7 @@ export interface MediaUpdate {
   duration: number;
   playing: boolean;
   seeking?: boolean;
+  completed?: boolean;
   playbackRate?: number;
   skip?: { kind: SkipKind; from: number; to: number; automatic: boolean };
 }
@@ -76,11 +78,15 @@ export function createPlaybackSession(options: {
   token: string | null;
   position: number;
   duration: number;
+  run?: number;
+  voiceChoice?: VoiceChoice;
+  voiceVote?: () => boolean;
   onCheckpoint?: (entry: WatchEntry) => void;
   onReport?: (event: PlaybackReport) => void;
   onChange?: (snapshot: PlaybackSnapshot) => void;
 }) {
   const { anime, video, token } = options;
+  const run = options.run ?? Date.now();
   const state: PlaybackSnapshot = {
     animeId: anime.anime_id,
     videoId: video.video_id,
@@ -104,7 +110,11 @@ export function createPlaybackSession(options: {
     dirty = false,
     intendedPlaying = false,
     sequence = 0,
-    lastReport = -Infinity;
+    lastReport = -Infinity,
+    recordedTime = 0,
+    nextActivity = 0,
+    voted = false,
+    completed = false;
   let last: { now: number; position: number; playing: boolean; seeking: boolean } | undefined;
 
   const snapshot = () => ({ ...state });
@@ -127,7 +137,21 @@ export function createPlaybackSession(options: {
     window.dispatchEvent(new CustomEvent<PlaybackReport>(PLAYER_EVENT, { detail: report }));
   };
 
+  const saveVoice = () => {
+    const elapsed = state.watchedSeconds - recordedTime;
+    if (elapsed <= 0 || (getSession()?.token || null) !== token) return;
+    trackVoice(
+      video.data.dubbing,
+      elapsed,
+      options.voiceChoice || 'default',
+      !voted && (options.voiceVote?.() ?? true)
+    );
+    voted = true;
+    recordedTime = state.watchedSeconds;
+  };
+
   const flush = () => {
+    saveVoice();
     if (!started || !dirty || (getSession()?.token || null) !== token) return;
     dirty = false;
 
@@ -143,14 +167,15 @@ export function createPlaybackSession(options: {
       position,
       duration,
       playing: intendedPlaying,
+      completed,
     };
 
-    savePlaybackRecovery(entry, token);
+    savePlaybackRecovery(entry, token, run);
     options.onCheckpoint?.(entry);
     state.sync = 'saving';
     options.onChange?.(snapshot());
     // Enqueue immediately, preserving old-source -> new-source ordering.
-    void recordWatch(anime, video, groupKey(video), position, duration, token)
+    void recordWatch(anime, video, groupKey(video), position, duration, token, run)
       .then(() => {
         if (attempt !== sequence || (getSession()?.token || null) !== token) return;
         state.sync = dirty ? 'pending' : 'saved';
@@ -199,8 +224,14 @@ export function createPlaybackSession(options: {
         const elapsed = Math.max(0, (now - last.now) / 1000),
           advanced = position - last.position;
 
-        if (advanced >= 0 && advanced <= elapsed * rate + 1)
+        if (advanced > 0 && advanced <= elapsed * rate + 1) {
           state.watchedSeconds += Math.min(elapsed, advanced / rate);
+          if (started && now >= nextActivity) {
+            watchActivity(anime, video, token, run, 'progress');
+            nextActivity = now + 60000;
+          }
+          if (state.watchedSeconds - recordedTime >= 15) saveVoice();
+        }
       }
       last = { now, position, playing: update.playing, seeking: !!update.seeking };
 
@@ -214,10 +245,16 @@ export function createPlaybackSession(options: {
         intendedPlaying = true;
       else if (['pause', 'ended'].includes(update.reason)) intendedPlaying = false;
       if (
-        update.reason === 'playing' ||
-        (update.reason === 'timeupdate' && update.playing && position > 0)
+        update.playing &&
+        (update.reason === 'playing' || (update.reason === 'timeupdate' && position > 0))
       )
         started = true;
+      if (started && !wasStarted) watchActivity(anime, video, token, run, 'start');
+      if (started && update.completed && !completed) {
+        completed = true;
+        dirty = true;
+        watchActivity(anime, video, token, run, 'complete');
+      }
       if (
         started &&
         (position !== state.position ||
@@ -235,6 +272,7 @@ export function createPlaybackSession(options: {
       options.onChange?.(snapshot());
       publish(update.reason, update.skip);
       if (
+        update.completed ||
         (started && !wasStarted) ||
         ['pause', 'seeked', 'ended', 'dispose', 'error', 'buffering', 'offline'].includes(
           update.reason

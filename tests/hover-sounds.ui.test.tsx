@@ -46,7 +46,7 @@ describe('intentional interface sounds', () => {
     vi.stubGlobal('AudioContext', Audio);
     render(
       <>
-        <InterfaceEffects watching={false} onBack={() => {}} />
+        <InterfaceEffects onBack={() => {}} />
         <main>
           <button>Первый</button>
           <button>Второй</button>
@@ -70,7 +70,7 @@ describe('intentional interface sounds', () => {
     expect(oscillators).toHaveBeenCalledTimes(2);
     fireEvent.pointerOver(second, { clientX: 25, clientY: 22 });
     expect(oscillators).toHaveBeenCalledTimes(2);
-    fireEvent.keyDown(first, { key: 'Shift' });
+    fireEvent.keyDown(first, { key: 'ArrowDown' });
     fireEvent.focusIn(first);
     expect(oscillators).toHaveBeenCalledTimes(3);
   });

@@ -12,6 +12,7 @@ import { Dropdown, Field, Icon, Input, SettingsCard, Toggle } from '~/ui';
 
 export const InterfaceSettingsCard: FC = () => {
   const settings = useInterfaceSettings();
+  const tv = document.documentElement.hasAttribute('data-tv');
 
   const changeScale = useCallback(
     (value: string) =>
@@ -120,10 +121,14 @@ export const InterfaceSettingsCard: FC = () => {
           onInput={changeEffectsVolume}
         />
       </Field>
-      <Toggle checked={settings.animations} onChange={changeAnimations}>
+      <Toggle checked={settings.animations} disabled={tv} onChange={changeAnimations}>
         Анимации переходов и боковых панелей
       </Toggle>
-      <p class="fine-print">Системная настройка уменьшения движения имеет приоритет.</p>
+      <p class="fine-print">
+        {tv
+          ? 'В режиме ТВ анимации отключены.'
+          : 'Системная настройка уменьшения движения имеет приоритет.'}
+      </p>
       <Field class="settings-choice" label="Оформление">
         <Dropdown
           aria-label="Стиль интерфейса"
@@ -137,16 +142,37 @@ export const InterfaceSettingsCard: FC = () => {
         />
       </Field>
       <div class="keyboard-reference">
-        <h3>Управление с клавиатуры</h3>
-        <p>
-          <kbd>← ↑ ↓ →</kbd> выбор · <kbd>Enter</kbd> открыть · <kbd>Esc / Backspace</kbd> закрыть
-          панель / назад · <kbd>/</kbd> или <kbd>Ctrl/⌘ K</kbd> поиск
-        </p>
-        <p>
-          При просмотре: <kbd>Enter</kbd> управление · <kbd>Space / K</kbd> пауза · <kbd>J / L</kbd>{' '}
-          ±10 с · <kbd>E</kbd> серии · <kbd>C</kbd> комментарии · <kbd>I</kbd> об аниме ·{' '}
-          <kbd>F</kbd> полный экран · <kbd>M</kbd> звук.
-        </p>
+        {tv ? (
+          <>
+            <h3>Управление пультом</h3>
+            <p>
+              <kbd>← ↑ ↓ →</kbd> перемещают фокус. <kbd>OK</kbd> открывает выбранное. Удерживай{' '}
+              <kbd>OK</kbd> на карточке, чтобы открыть действия с аниме. <kbd>Назад</kbd> закрывает
+              открытое меню или возвращает к предыдущему экрану.
+            </p>
+            <p>
+              Нажми <kbd>OK</kbd> на поле, списке или слайдере, чтобы включить его управление.
+              <kbd>Назад</kbd> возвращает управление стрелками.
+            </p>
+            <p>
+              Во время просмотра <kbd>OK</kbd> ставит на паузу или продолжает, <kbd>← / →</kbd>{' '}
+              перематывают на 10 секунд, <kbd>↑ / ↓</kbd> показывают управление.
+            </p>
+          </>
+        ) : (
+          <>
+            <h3>Управление с клавиатуры</h3>
+            <p>
+              <kbd>← ↑ ↓ →</kbd> выбор · <kbd>Enter</kbd> открыть · <kbd>Esc / Backspace</kbd>{' '}
+              закрыть панель / назад · <kbd>/</kbd> или <kbd>Ctrl/⌘ K</kbd> поиск
+            </p>
+            <p>
+              При просмотре <kbd>Enter</kbd> управление · <kbd>Space / K</kbd> пауза ·{' '}
+              <kbd>J / L</kbd> ±10 с · <kbd>E</kbd> серии · <kbd>C</kbd> комментарии · <kbd>I</kbd>{' '}
+              об аниме · <kbd>F</kbd> полный экран · <kbd>M</kbd> звук.
+            </p>
+          </>
+        )}
       </div>
     </SettingsCard>
   );

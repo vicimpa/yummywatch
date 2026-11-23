@@ -17,7 +17,7 @@ function Probe() {
   }, []);
   return (
     <div ref={frame} class="player-frame universal-frame" style={{ height: '100vh' }}>
-      <InterfaceEffects watching onBack={() => {}} />
+      <InterfaceEffects onBack={() => {}} />
       <video ref={media} />
       <VideoControls
         media={media}

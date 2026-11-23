@@ -2,7 +2,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { waitFor } from '@testing-library/preact';
 import { createPlaybackSession, PLAYER_EVENT, type PlaybackReport } from '~/lib/playback-session';
-import { getLibraryState, normalizeHistory, resetAccountLibrary } from '~/lib/library';
+import {
+  getLibraryState,
+  normalizeHistory,
+  removeContinue,
+  resetAccountLibrary,
+  runWatchMaintenance,
+  setAnimeList,
+} from '~/lib/library';
 import { clearSession, saveSession } from '~/lib/session';
 import { resumeVideo, videoPosition } from '~/lib/player';
 import { readPlaybackRecovery } from '~/lib/playback-recovery';
@@ -243,5 +250,64 @@ describe('playback progress in the original account', () => {
     first.update({ reason: 'pause', position: 211, duration: 1400, playing: false });
     await Promise.resolve();
     expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('automatic watch lists', () => {
+  const title = {
+    ...anime,
+    anime_status: { alias: 'released', title: 'Вышел' },
+    episodes: { aired: 2, count: 2 },
+  };
+  const progress = { reason: 'playing' as const, position: 42, duration: 80, playing: true };
+
+  it('ignores an incomplete voice as a finale and hides history after the actual finale', () => {
+    const episode = (number: string, run: number) =>
+      createPlaybackSession({
+        anime: title,
+        video: video(number),
+        token: null,
+        position: 0,
+        duration: 80,
+        run,
+      });
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    const first = episode('1', now - 10);
+    first.update(progress);
+    expect(getLibraryState().lists?.[0]?.[0].anime_id).toBe(title.anime_id);
+    first.update({ ...progress, completed: true });
+    expect(getLibraryState().lists?.[0]?.[0].anime_id).toBe(title.anime_id);
+    removeContinue(title.anime_id);
+    first.update({ ...progress, position: 70, reason: 'pause', playing: false });
+    expect(getLibraryState().history).toEqual([]);
+    expect(getLibraryState().lists?.[5]?.[0].anime_id).toBe(title.anime_id);
+
+    vi.mocked(Date.now).mockReturnValue(now + 10);
+    const finale = episode('2', now + 10);
+    finale.update(progress);
+    finale.update({ ...progress, position: 72, reason: 'seeked' });
+    expect(getLibraryState().lists?.[0]?.[0].anime_id).toBe(title.anime_id);
+    finale.update({ ...progress, position: 73, completed: true });
+    finale.update({ ...progress, position: 75, reason: 'pause', playing: false });
+    expect(getLibraryState().lists?.[2]?.[0].anime_id).toBe(title.anime_id);
+    expect(getLibraryState().history).toEqual([]);
+  });
+
+  it('moves an inactive series with a confirmed last viewing to abandoned', async () => {
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now - 31 * 86400 * 1000);
+    await setAnimeList(title, 0);
+    const playback = createPlaybackSession({
+      anime: title,
+      video: video('1'),
+      token: null,
+      position: 0,
+      duration: 80,
+    });
+    playback.update(progress);
+    vi.mocked(Date.now).mockReturnValue(now);
+    runWatchMaintenance();
+    expect(getLibraryState().lists?.[3]?.[0].anime_id).toBe(title.anime_id);
   });
 });

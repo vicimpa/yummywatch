@@ -10,6 +10,7 @@ import { pageDirection, pageSlide } from './page-transitions';
 import { canonicalPath, initializeNavigation, recordNavigation } from './navigation';
 import { getSession, restoreStoredSession, SESSION_EVENT, SESSION_KEY } from './session';
 import { LIBRARY_EVENT } from './storage';
+import { isTvMode } from './tv-mode';
 import type { Result } from './types';
 
 export function useResource<T>(
@@ -302,13 +303,13 @@ export function useHash() {
 export function useVisualViewport() {
   useEffect(() => {
     const viewport = window.visualViewport;
+    const tv = isTvMode();
 
     const update = () => {
-      document.documentElement.style.setProperty(
-        '--visual-height',
-        `${viewport?.height || window.innerHeight}px`
-      );
-      document.documentElement.style.setProperty('--visual-top', `${viewport?.offsetTop || 0}px`);
+      const height = tv ? window.innerHeight : viewport?.height || window.innerHeight;
+      const top = tv ? 0 : viewport?.offsetTop || 0;
+      document.documentElement.style.setProperty('--visual-height', `${height}px`);
+      document.documentElement.style.setProperty('--visual-top', `${top}px`);
       document.documentElement.dataset.keyboard =
         viewport && window.innerHeight - viewport.height > 140 ? 'open' : 'closed';
     };
@@ -316,10 +317,12 @@ export function useVisualViewport() {
     update();
     viewport?.addEventListener('resize', update);
     viewport?.addEventListener('scroll', update);
+    if (tv) window.addEventListener('resize', update);
 
     return () => {
       viewport?.removeEventListener('resize', update);
       viewport?.removeEventListener('scroll', update);
+      if (tv) window.removeEventListener('resize', update);
       delete document.documentElement.dataset.keyboard;
     };
   }, []);

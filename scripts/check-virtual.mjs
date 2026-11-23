@@ -89,20 +89,39 @@ for (const engine of [webkit, chromium]) {
     );
     await page.keyboard.press('End');
 
-    const visible = () =>
-      page.waitForFunction(
-        () => {
-          const node = document.activeElement.closest('[data-gallery-item]');
+    const visible = async () => {
+      try {
+        await page.waitForFunction(
+          () => {
+            const node = document.activeElement.closest('[data-gallery-item]');
 
-          if (!node) return false;
+            if (!node) return false;
 
-          const r = node.getBoundingClientRect();
+            const r = node.getBoundingClientRect();
 
-          return r.top >= 55 && r.bottom <= innerHeight - 10;
-        },
-        null,
-        { timeout: 15000 }
-      );
+            return r.top >= 55 && r.bottom <= innerHeight - 10;
+          },
+          null,
+          { timeout: 15000 }
+        );
+      } catch (error) {
+        const state = await page.evaluate(() => {
+          const card = document.activeElement?.closest('[data-gallery-item]');
+          const main = document.getElementById('main');
+          return {
+            focus: document.activeElement?.textContent?.slice(0, 80),
+            index: card?.closest('[data-virtual-index]')?.getAttribute('data-virtual-index'),
+            card: card?.getBoundingClientRect().toJSON(),
+            main: main?.getBoundingClientRect().toJSON(),
+            scrollTop: main?.scrollTop,
+            scrollHeight: main?.scrollHeight,
+          };
+        });
+        throw new Error(`Focused card is outside the viewport. ${JSON.stringify(state)}`, {
+          cause: error,
+        });
+      }
+    };
 
     await visible();
     assert.equal(

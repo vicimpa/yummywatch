@@ -18,7 +18,6 @@ export const SELECTABLE_CONTENT = [
   '.full-synopsis',
   '.anime-facts dd',
   '.viewing-order strong',
-  '.voice-tile strong',
   '.sidebar-header p',
   '.comment-text',
   '.comment-author',

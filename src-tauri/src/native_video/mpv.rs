@@ -4,25 +4,27 @@ use std::{
 };
 
 #[cfg(target_os = "windows")]
-use std::{path::Path, sync::OnceLock};
+use std::path::Path;
+#[cfg(any(target_os = "windows", target_os = "android"))]
+use std::sync::OnceLock;
 
 // Stable subset of the libmpv 2.x client and software rendering ABIs.
 macro_rules! mpv_api {
-    ($(fn $name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?;)*) => {
+    ($($(#[$attr:meta])* fn $name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?;)*) => {
         pub(super) struct Api {
-            $($name: unsafe extern "C" fn($($ty),*) $(-> $ret)?,)*
-            #[cfg(target_os = "windows")]
+            $($(#[$attr])* $name: unsafe extern "C" fn($($ty),*) $(-> $ret)?,)*
+            #[cfg(any(target_os = "windows", target_os = "android"))]
             _library: libloading::Library,
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         #[link(name = "mpv")]
         extern "C" {
-            $(fn $name($($arg: $ty),*) $(-> $ret)?;)*
+            $($(#[$attr])* fn $name($($arg: $ty),*) $(-> $ret)?;)*
         }
 
-        #[cfg(not(target_os = "windows"))]
-        pub(super) static API: Api = Api { $($name,)* };
+        #[cfg(target_os = "linux")]
+        pub(super) static API: Api = Api { $($(#[$attr])* $name,)* };
 
         #[cfg(target_os = "windows")]
         impl Api {
@@ -33,8 +35,19 @@ macro_rules! mpv_api {
                     Library::load_with_flags(path, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)?
                 };
                 Ok(Self {
-                    $($name: unsafe { *library.get(concat!(stringify!($name), "\0").as_bytes())? },)*
+                    $($(#[$attr])* $name: unsafe { *library.get(concat!(stringify!($name), "\0").as_bytes())? },)*
                     _library: library.into(),
+                })
+            }
+        }
+
+        #[cfg(target_os = "android")]
+        impl Api {
+            fn load() -> Result<Self, libloading::Error> {
+                let library = unsafe { libloading::Library::new("libmpv.so")? };
+                Ok(Self {
+                    $($(#[$attr])* $name: unsafe { *library.get(concat!(stringify!($name), "\0").as_bytes())? },)*
+                    _library: library,
                 })
             }
         }
@@ -50,9 +63,14 @@ mpv_api! {
     fn mpv_set_property_async(handle: *mut c_void, reply: u64, name: *const c_char, format: c_int, data: *mut c_void) -> c_int;
     fn mpv_get_property(handle: *mut c_void, name: *const c_char, format: c_int, data: *mut c_void) -> c_int;
     fn mpv_wait_event(handle: *mut c_void, timeout: f64) -> *const Event;
+    fn mpv_error_string(error: c_int) -> *const c_char;
+    #[cfg(not(target_os = "android"))]
     fn mpv_render_context_create(ctx: *mut *mut c_void, handle: *mut c_void, params: *mut RenderParam) -> c_int;
+    #[cfg(not(target_os = "android"))]
     fn mpv_render_context_update(ctx: *mut c_void) -> u64;
+    #[cfg(not(target_os = "android"))]
     fn mpv_render_context_render(ctx: *mut c_void, params: *mut RenderParam) -> c_int;
+    #[cfg(not(target_os = "android"))]
     fn mpv_render_context_free(ctx: *mut c_void);
 }
 
@@ -64,6 +82,14 @@ pub(super) fn windows_api(path: &Path) -> Result<&'static Api, String> {
     })
     .as_ref()
     .map_err(Clone::clone)
+}
+
+#[cfg(target_os = "android")]
+pub(super) fn android_api() -> Result<&'static Api, String> {
+    static API: OnceLock<Result<Api, String>> = OnceLock::new();
+    API.get_or_init(|| Api::load().map_err(|error| format!("Не удалось загрузить libmpv: {error}")))
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 const FLAG: c_int = 3;
@@ -84,11 +110,25 @@ struct Event {
 }
 
 #[repr(C)]
+struct EndFile {
+    reason: c_int,
+    error: c_int,
+}
+
+#[cfg(target_os = "android")]
+pub(super) struct AndroidOutput {
+    pub(super) surface: jni::objects::GlobalRef,
+    pub(super) certificates: CString,
+}
+
+#[cfg(not(target_os = "android"))]
+#[repr(C)]
 struct RenderParam {
     kind: c_int,
     data: *mut c_void,
 }
 
+#[cfg(not(target_os = "android"))]
 impl RenderParam {
     fn input<T>(kind: c_int, data: &T) -> Self {
         Self {
@@ -106,11 +146,15 @@ impl RenderParam {
 pub(super) struct Player {
     api: &'static Api,
     handle: NonNull<c_void>,
+    #[cfg(not(target_os = "android"))]
     render: Option<NonNull<c_void>>,
     caption: Option<CString>,
-    failure: bool,
+    failure: Option<String>,
     ready: bool,
+    #[cfg(not(target_os = "android"))]
     render_size: Option<[c_int; 2]>,
+    #[cfg(target_os = "android")]
+    _surface: jni::objects::GlobalRef,
 }
 
 // A session is moved between blocking workers. Its mutex serializes every
@@ -125,17 +169,22 @@ impl Player {
         start: f64,
         relayed_hls: bool,
         silent: bool,
+        #[cfg(target_os = "android")] output: AndroidOutput,
     ) -> Result<Self, String> {
         let handle = NonNull::new(unsafe { (api.mpv_create)() })
             .ok_or("Не удалось создать плеер libmpv.")?;
-        let mut player = Self {
+        let player = Self {
             api,
             handle,
+            #[cfg(not(target_os = "android"))]
             render: None,
             caption,
-            failure: false,
+            failure: None,
             ready: false,
+            #[cfg(not(target_os = "android"))]
             render_size: None,
+            #[cfg(target_os = "android")]
+            _surface: output.surface,
         };
         let start = CString::new(start.clamp(0.0, 86400.0).to_string()).unwrap();
         for (name, value) in [
@@ -149,13 +198,32 @@ impl Player {
             (c"pause", c"yes"),
             (c"mute", c"yes"),
             (c"keep-open", c"yes"),
-            (c"vo", c"libmpv"),
-            (c"hwdec", c"auto-copy"),
             (c"tls-verify", c"yes"),
             (c"network-timeout", c"15"),
             (c"start", start.as_c_str()),
         ] {
             player.option(name, value)?;
+        }
+        if let Some(referrer) = crate::providers::native_aksor_referrer(url) {
+            player.option(c"referrer", &referrer)?;
+        }
+        #[cfg(target_os = "android")]
+        {
+            let surface =
+                CString::new((player._surface.as_obj().as_raw() as usize).to_string()).unwrap();
+            player.option(c"profile", c"fast")?;
+            player.option(c"wid", &surface)?;
+            player.option(c"vo", c"gpu")?;
+            player.option(c"gpu-context", c"android")?;
+            player.option(c"gpu-api", c"opengl")?;
+            player.option(c"opengl-es", c"yes")?;
+            player.option(c"hwdec", c"mediacodec,mediacodec-copy")?;
+            player.option(c"tls-ca-file", &output.certificates)?;
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            player.option(c"vo", c"libmpv")?;
+            player.option(c"hwdec", c"auto-copy")?;
         }
         if silent {
             player.option(c"ao", c"null")?;
@@ -175,21 +243,26 @@ impl Player {
         if unsafe { (api.mpv_initialize)(handle.as_ptr()) } < 0 {
             return Err("Не удалось запустить libmpv.".into());
         }
-        let mut context = ptr::null_mut();
-        let mut params = [
-            RenderParam {
-                kind: 1,
-                data: c"sw".as_ptr().cast_mut().cast(),
-            },
-            RenderParam::END,
-        ];
-        if unsafe {
-            (api.mpv_render_context_create)(&mut context, handle.as_ptr(), params.as_mut_ptr())
-        } < 0
-        {
-            return Err("Не удалось создать видеоповерхность libmpv.".into());
-        }
-        player.render = NonNull::new(context);
+        #[cfg(not(target_os = "android"))]
+        let player = {
+            let mut player = player;
+            let mut context = ptr::null_mut();
+            let mut params = [
+                RenderParam {
+                    kind: 1,
+                    data: c"sw".as_ptr().cast_mut().cast(),
+                },
+                RenderParam::END,
+            ];
+            if unsafe {
+                (api.mpv_render_context_create)(&mut context, handle.as_ptr(), params.as_mut_ptr())
+            } < 0
+            {
+                return Err("Не удалось создать видеоповерхность libmpv.".into());
+            }
+            player.render = NonNull::new(context);
+            player
+        };
         if !player.command(&[c"loadfile", url]) {
             return Err("Не удалось открыть поток в libmpv.".into());
         }
@@ -269,8 +342,12 @@ impl Player {
                     }
                 }
                 EVENT_END_FILE if !event.data.is_null() => {
-                    let reason = unsafe { *event.data.cast::<c_int>() };
-                    self.failure |= reason == END_FILE_ERROR;
+                    let end = unsafe { &*event.data.cast::<EndFile>() };
+                    if end.reason == END_FILE_ERROR {
+                        let message =
+                            unsafe { CStr::from_ptr((self.api.mpv_error_string)(end.error)) };
+                        self.failure = Some(message.to_string_lossy().into_owned());
+                    }
                 }
                 _ => {}
             }
@@ -301,25 +378,33 @@ impl Player {
             }
         }
         let position = self.number(c"time-pos").max(0.0);
+        let frame_width = self
+            .get::<i64>(c"video-out-params/dw", INT64)
+            .unwrap_or_default();
+        let frame_height = self
+            .get::<i64>(c"video-out-params/dh", INT64)
+            .unwrap_or_default();
+        #[cfg(target_os = "android")]
+        let has_frame = frame_width > 0 && frame_height > 0;
+        #[cfg(not(target_os = "android"))]
+        let has_frame = self.render_size.is_some();
         super::Snapshot {
             position,
             duration: self.number(c"duration"),
             buffered: self.number(c"demuxer-cache-time").max(position),
-            ready: self.ready && self.render_size.is_some(),
-            frame_width: self
-                .get::<i64>(c"video-out-params/dw", INT64)
-                .unwrap_or_default(),
-            frame_height: self
-                .get::<i64>(c"video-out-params/dh", INT64)
-                .unwrap_or_default(),
+            ready: self.ready && has_frame,
+            frame_width,
+            frame_height,
             seeking: seek || self.flag(c"seeking").unwrap_or_default(),
             buffering: self.flag(c"paused-for-cache").unwrap_or_default(),
             ended: !seek && self.flag(c"eof-reached").unwrap_or_default(),
-            failure: self.failure,
+            failure: self.failure.is_some(),
+            failure_message: self.failure.clone(),
             paused: controls.pause.or_else(|| self.flag(c"pause")),
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(super) fn pixels(&mut self, size: [c_int; 2]) -> Vec<u8> {
         let Some(context) = self.render else {
             return Vec::new();
@@ -369,6 +454,7 @@ impl Player {
 impl Drop for Player {
     fn drop(&mut self) {
         unsafe {
+            #[cfg(not(target_os = "android"))]
             if let Some(context) = self.render {
                 (self.api.mpv_render_context_free)(context.as_ptr());
             }

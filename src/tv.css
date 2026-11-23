@@ -1,0 +1,56 @@
+html[data-tv] .media-backdrop {
+  display: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html[data-tv] .playback-spinner {
+    animation: playback-spin 0.9s linear infinite !important;
+  }
+}
+
+html[data-tv] :is(.media-nav, .media-sidebar, .phone-header, .mobile-sheet) {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+html[data-tv] .text-link {
+  padding-inline: 9px;
+  border-radius: 7px;
+}
+
+html[data-tv] .gallery-rail {
+  padding-inline: 8px;
+  margin-inline: -8px;
+  scroll-padding-inline: 8px;
+  scroll-snap-type: none;
+}
+
+html[data-tv] :is(.profile-tabs, .home-tabs.episode-voice-tabs) {
+  gap: 8px;
+  padding: 3px 4px;
+  scroll-padding-inline: 4px;
+}
+
+html[data-tv] :is(.profile-tabs, .home-tabs.episode-voice-tabs) > :is(a, button) {
+  min-height: 40px;
+  padding: 8px 11px;
+  border-radius: 7px;
+}
+
+html[data-tv] .video-settings-selects {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+html[data-tv] .gallery-feature-poster {
+  min-width: 0;
+  width: 100%;
+  align-self: start;
+}
+
+@supports not (height: 100dvh) {
+  html[data-tv] .media-workspace,
+  html[data-tv] .media-app.is-playback main,
+  html[data-tv] :is(.anime-room, .universal-stage, .universal-frame):fullscreen {
+    height: 100vh;
+  }
+}

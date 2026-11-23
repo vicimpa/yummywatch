@@ -1,3 +1,4 @@
+import { voiceKey } from './streams';
 import type { Anime, Video, WatchEntry } from './types';
 
 export function playerUrl(raw: string) {
@@ -12,6 +13,24 @@ export function playerUrl(raw: string) {
 
 export const groupKey = (video: Video) =>
   JSON.stringify([video.data.player_id, video.data.player, video.data.dubbing]);
+
+export function watchMatchesVideo(
+  entry: WatchEntry,
+  video: Pick<Video, 'video_id' | 'number'> & { data: Pick<Video['data'], 'dubbing'> }
+) {
+  if (entry.videoId > 0 && entry.videoId === video.video_id) return true;
+  if (entry.episode !== video.number) return false;
+  try {
+    const group: unknown = JSON.parse(entry.group);
+    return (
+      Array.isArray(group) &&
+      typeof group[2] === 'string' &&
+      voiceKey(group[2]) === voiceKey(video.data.dubbing)
+    );
+  } catch {
+    return false;
+  }
+}
 
 export function groupVideos(videos: Video[]) {
   const groups = new Map<string, { label: string; videos: Video[] }>();
@@ -35,6 +54,9 @@ export function groupVideos(videos: Video[]) {
 
   return groups;
 }
+
+export const canStartAnime = (anime: Anime) =>
+  anime.anime_status?.alias !== 'announcement' || (anime.episodes?.aired ?? 0) > 0;
 
 export function resumeVideo(videos: Video[], entry?: WatchEntry) {
   const latest = [...videos]
@@ -69,13 +91,13 @@ export function latestWatchEntry(anime: Anime, videos: Video[]): WatchEntry | un
   };
 }
 
-export function playbackUrl(video: Video, position: number) {
+export function playbackUrl(video: Video, position: number, exact = false) {
   const raw = playerUrl(video.iframe_url);
 
   if (!raw) return '';
 
   const url = new URL(raw);
-  const start = Math.max(0, Math.floor(position - 5));
+  const start = Math.max(0, Math.floor(position - (exact ? 0 : 5)));
 
   if (Number.isFinite(start) && start > 0) {
     if (url.hostname.includes('kodik') || url.pathname.includes('iframeCVH'))

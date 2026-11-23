@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   canonicalPath,
   initializeNavigation,
+  leavePlayback,
   navigateBack,
   navigateForward,
   navigation,
@@ -50,6 +51,30 @@ describe('application navigation history', () => {
     initializeNavigation();
     navigateBack('/');
     expect(location.hash).toBe('#/');
+  });
+  it('uses the existing title page when leaving a player opened from that page', () => {
+    history.replaceState(null, '', '#/anime/9?view=anime-about');
+    initializeNavigation();
+    history.pushState(null, '', '#/anime/9?view=watch&play=1');
+    recordNavigation();
+    initializeNavigation();
+    const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+    leavePlayback('/anime/9');
+    expect(back).toHaveBeenCalledOnce();
+    back.mockRestore();
+  });
+  it('replaces the player entry when starting directly from Continue Watching', () => {
+    initializeNavigation();
+    const origin = history.state;
+    history.pushState(null, '', '#/anime/9?view=watch&play=1');
+    recordNavigation();
+    const length = history.length;
+    leavePlayback('/anime/9');
+    expect(location.hash).toBe('#/anime/9');
+    expect(history.length).toBe(length);
+    expect(recordNavigation()).toBeUndefined();
+    history.replaceState(origin, '', '#/profile?tab=collection');
+    expect(recordNavigation()).toBe('back');
   });
 });
 

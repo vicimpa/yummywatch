@@ -1,14 +1,27 @@
 import { useEffect, useState } from 'preact/hooks';
 
-export function useAppEnvironment() {
+export function useOnline() {
   const [online, setOnline] = useState(navigator.onLine);
 
   useEffect(() => {
-    let focusTimer: ReturnType<typeof setTimeout>;
-
     const connect = () => setOnline(true);
-
     const disconnect = () => setOnline(false);
+    window.addEventListener('online', connect);
+    window.addEventListener('offline', disconnect);
+    return () => {
+      window.removeEventListener('online', connect);
+      window.removeEventListener('offline', disconnect);
+    };
+  }, []);
+
+  return online;
+}
+
+export function useAppEnvironment() {
+  const online = useOnline();
+
+  useEffect(() => {
+    let focusTimer: ReturnType<typeof setTimeout>;
 
     const focusSearch = () => document.getElementById('anime-search')?.focus();
 
@@ -28,14 +41,10 @@ export function useAppEnvironment() {
       focusTimer = setTimeout(focusSearch, 100);
     };
 
-    window.addEventListener('online', connect);
-    window.addEventListener('offline', disconnect);
     window.addEventListener('keydown', keyboard);
 
     return () => {
       clearTimeout(focusTimer);
-      window.removeEventListener('online', connect);
-      window.removeEventListener('offline', disconnect);
       window.removeEventListener('keydown', keyboard);
     };
   }, []);

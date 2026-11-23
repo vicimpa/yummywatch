@@ -1,6 +1,12 @@
 mod alloha;
 mod backend;
 mod discord;
+#[cfg(any(desktop, target_os = "android"))]
+mod download_dash;
+#[cfg(desktop)]
+mod download_hls;
+#[cfg(desktop)]
+mod downloads;
 mod images;
 mod interface_scale;
 mod keep_awake;
@@ -11,7 +17,7 @@ mod media;
 mod native_video;
 #[cfg(target_os = "macos")]
 pub use native_video::check_bundled_library;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "android"))]
 #[path = "native_video/portable.rs"]
 mod native_video;
 mod providers;
@@ -30,12 +36,16 @@ use tauri::Manager;
 #[serde(rename_all = "camelCase")]
 struct DesktopInfo {
     platform: &'static str,
+    #[cfg(target_os = "android")]
+    native_mpv: bool,
 }
 
 #[tauri::command]
 fn desktop_info() -> DesktopInfo {
     DesktopInfo {
         platform: std::env::consts::OS,
+        #[cfg(target_os = "android")]
+        native_mpv: native_video::available(),
     }
 }
 
@@ -173,15 +183,72 @@ async fn save_poster(
 }
 
 #[tauri::command]
+fn proxy_settings(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, backend::Backend>,
+    enabled: Option<bool>,
+) -> Result<bool, String> {
+    if window.label() != "main" {
+        return Err("Неизвестное окно.".into());
+    }
+    state.proxy_settings(enabled)
+}
+
+#[tauri::command]
+fn proxy_pool_report(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, backend::Backend>,
+    preferences: Option<backend::PoolPreferences>,
+    check_now: Option<bool>,
+) -> Result<backend::PoolReport, String> {
+    if window.label() != "main" {
+        return Err("Неизвестное окно.".into());
+    }
+    state.proxy_pool_report(preferences, check_now.unwrap_or(false))
+}
+
+#[tauri::command]
+fn edit_custom_proxy(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, backend::Backend>,
+    change: backend::CustomProxyChange,
+) -> Result<backend::PoolReport, String> {
+    if window.label() != "main" {
+        return Err("Неизвестное окно.".into());
+    }
+    state.edit_custom_proxy(change)
+}
+
+#[tauri::command]
 async fn resolve_candidates(
     state: tauri::State<'_, backend::Backend>,
     candidates: Vec<providers::Candidate>,
     quality: Option<u32>,
+    anime_id: Option<u64>,
 ) -> Result<serde_json::Value, String> {
-    match quality {
+    #[cfg(desktop)]
+    let episode = candidates
+        .first()
+        .map(|candidate| candidate.episode.clone());
+    #[cfg(mobile)]
+    let _ = anime_id;
+    #[cfg(desktop)]
+    if let (Some(store), Some(quality)) = (&state.downloads, quality) {
+        if let Some(result) = store.playable(&candidates, quality).await {
+            return Ok(result);
+        }
+    }
+    let result = match quality {
         Some(quality) => state.resolve_quality(candidates, Some(quality)).await,
         None => state.resolve(candidates).await,
+    }?;
+    #[cfg(desktop)]
+    if let Some(store) = &state.downloads {
+        return Ok(store
+            .wrap_episode(result, anime_id.zip(episode.as_deref()))
+            .await);
     }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -189,6 +256,12 @@ async fn inspect_stream_qualities(
     state: tauri::State<'_, backend::Backend>,
     candidates: Vec<providers::Candidate>,
 ) -> Result<Vec<u32>, String> {
+    #[cfg(desktop)]
+    if let Some(store) = &state.downloads {
+        if let Some(saved) = store.ready_copy(&candidates, 480).await {
+            return Ok(vec![saved.quality]);
+        }
+    }
     state.inspect_qualities(candidates).await
 }
 
@@ -300,6 +373,10 @@ pub fn run() {
                 keep_awake::clear(webview);
                 #[cfg(desktop)]
                 let _ = webview.run_on_main_thread(native_video::clear);
+                #[cfg(target_os = "android")]
+                if let Some(window) = webview.get_webview_window("main") {
+                    native_video::clear_webview(window);
+                }
             }
         })
         .on_window_event(|window, event| {
@@ -315,7 +392,7 @@ pub fn run() {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 #[cfg(not(target_os = "android"))]
                 keep_awake::window_destroyed(window);
-                #[cfg(desktop)]
+                #[cfg(any(desktop, target_os = "android"))]
                 native_video::clear();
             }
             if window.label() == "main"
@@ -336,7 +413,18 @@ pub fn run() {
                 macos_window::install(&window)?;
             }
             app.manage(discord::DiscordPresence::new());
-            app.manage(backend::Backend::new()?);
+            let backend = backend::Backend::new()?
+                .with_proxy_settings(app.path().app_config_dir()?.join("proxy-disabled"));
+            #[cfg(desktop)]
+            let backend = {
+                let store = downloads::Store::new(app.path().app_data_dir()?.join("downloads"));
+                let backend = backend.with_downloads(store.clone());
+                store.start(backend.clone());
+                app.manage(store);
+                backend
+            };
+            backend.start_proxy_checks();
+            app.manage(backend);
             app.manage(session::SessionVault::new(
                 app.path().app_data_dir()?.join("account/session-v1.json"),
             ));
@@ -376,13 +464,34 @@ pub fn run() {
             yummy_request,
             server_status::yummy_server_status,
             updates::latest_app_release,
+            proxy_settings,
+            proxy_pool_report,
+            edit_custom_proxy,
             resolve_candidates,
             inspect_stream_qualities,
             #[cfg(desktop)]
-            shutdown::window_close_saved,
+            downloads::list_downloads,
             #[cfg(desktop)]
+            downloads::enqueue_downloads,
+            #[cfg(desktop)]
+            downloads::change_download,
+            #[cfg(desktop)]
+            downloads::remove_downloads,
+            #[cfg(desktop)]
+            downloads::download_settings,
+            #[cfg(desktop)]
+            downloads::download_storage,
+            #[cfg(desktop)]
+            downloads::clear_download_storage,
+            #[cfg(desktop)]
+            downloads::prefetch_download_episode,
+            #[cfg(desktop)]
+            downloads::cancel_download_prefetch,
+            #[cfg(desktop)]
+            shutdown::window_close_saved,
+            #[cfg(any(desktop, target_os = "android"))]
             native_video::native_video,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "android"))]
             native_video::native_video_frame,
             #[cfg(target_os = "macos")]
             native_video::native_video_card_frame,

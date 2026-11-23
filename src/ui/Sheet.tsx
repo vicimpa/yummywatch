@@ -15,6 +15,7 @@ export type TSheetProps = {
   actions?: ComponentChildren;
   navigation?: ComponentChildren;
   className?: string;
+  onKeyDown?: ComponentProps<'dialog'>['onKeyDown'];
 };
 
 export const Sheet: FC<TSheetProps> = ({
@@ -26,6 +27,7 @@ export const Sheet: FC<TSheetProps> = ({
   actions,
   navigation,
   className = '',
+  onKeyDown,
 }) => {
   const id = useId();
   const dialog = useRef<HTMLDialogElement>(null);
@@ -65,10 +67,11 @@ export const Sheet: FC<TSheetProps> = ({
       aria-labelledby={id}
       onCancel={cancel}
       onClick={closeBackdrop}
+      onKeyDown={onKeyDown}
     >
       <div class="mobile-sheet-layout">
         <header class="mobile-sheet-header">
-          <Button type="button" onClick={close} aria-label="Закрыть" variant="icon">
+          <Button type="button" onClick={close} aria-label="Закрыть" variant="icon" data-tv-close>
             <Icon name="close" />
           </Button>
           <div>

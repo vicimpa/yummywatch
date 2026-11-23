@@ -1,10 +1,11 @@
 import { Component, render, type ComponentChildren } from 'preact';
 
 import { initializeCache } from '~/lib/cache-store';
-import { initializeDesktop, isDesktop } from '~/lib/desktop';
+import { initializeDesktop } from '~/lib/desktop';
 import { initializeInterfaceScale } from '~/lib/interface-scale';
 import { notify } from '~/lib/notifications';
 import { initializeSession } from '~/lib/session';
+import { installAndroidWebViewCompatibility } from '~/lib/android-webview';
 
 import { App } from './App';
 import { StartupError } from '~/components/StartupError';
@@ -20,6 +21,7 @@ import './touch.css';
 import './profile.css';
 import './scrollbars.css';
 import './social.css';
+import './tv.css';
 
 class ErrorBoundary extends Component<{ children: ComponentChildren }, { failed: boolean }> {
   state = { failed: false };
@@ -43,15 +45,9 @@ class ErrorBoundary extends Component<{ children: ComponentChildren }, { failed:
 }
 
 async function start() {
+  if (/Android/i.test(navigator.userAgent)) installAndroidWebViewCompatibility();
   const root = document.getElementById('app')!;
 
-  if (isDesktop())
-    render(
-      <div class="fatal-error" role="status">
-        Открываем YummyWatch…
-      </div>,
-      root
-    );
   try {
     await initializeDesktop();
     await initializeInterfaceScale();
@@ -80,6 +76,8 @@ async function start() {
       />,
       root
     );
+  } finally {
+    document.getElementById('app-startup')?.remove();
   }
 }
 

@@ -8,7 +8,10 @@ import { isDesktop } from '~/lib/desktop';
 import { AccountCard } from './Account';
 import { DiscordSettingsCard } from './DiscordSettings';
 import { InterfaceSettingsCard } from './InterfaceSettings';
+import { VoiceRankingSettings } from './VoiceRankingSettings';
+import { DownloadSettingsCard } from './DownloadSettings';
 import { PlaybackSettingsCard } from './PlaybackSettings';
+import { ProxySettingsCard } from './ProxySettings';
 import { ServerStatusCard } from './ServerStatusCard';
 import { NotificationSettingsCard } from './Social';
 import { Button, ButtonLink, Icon, SettingsCard } from '~/ui';
@@ -22,7 +25,7 @@ export type TSettingsProps = {
 };
 
 export const Settings: FC<TSettingsProps> = ({ installPrompt, install, installed }) => (
-  <>
+  <div data-tv-vertical>
     <div class="page-heading">
       <p class="eyebrow">ЧУТЬ БОЛЬШЕ УЮТА</p>
       <h1>Настройки</h1>
@@ -33,6 +36,9 @@ export const Settings: FC<TSettingsProps> = ({ installPrompt, install, installed
     <AccountCard />
     <NotificationSettingsCard />
     <PlaybackSettingsCard />
+    <ProxySettingsCard />
+    <DownloadSettingsCard />
+    <VoiceRankingSettings />
     <DiscordSettingsCard />
     {!isDesktop() && (
       <SettingsCard
@@ -102,5 +108,5 @@ export const Settings: FC<TSettingsProps> = ({ installPrompt, install, installed
         <Icon name="external" size={15} />
       </ButtonLink>
     </div>
-  </>
+  </div>
 );

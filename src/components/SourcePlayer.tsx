@@ -7,9 +7,13 @@ import { usePlaybackWakeLock } from '~/hooks/usePlaybackWakeLock';
 import { useAnimeDiscordContext } from '~/hooks/useAnimeDiscordContext';
 import { useFullscreen } from '~/hooks/useFullscreen';
 import { useSourcePlayback } from '~/hooks/useSourcePlayback';
+import { isContinueHidden } from '~/lib/continue-cache';
+import { firstEpisode, rankedStart, type VoiceChoice } from '~/lib/voice-ranking';
 import { animeVideos, imageUrl, peekAnimeVideos } from '~/lib/api';
 import { useMediaQuery, useResource, useSession } from '~/lib/hooks';
 import { notify } from '~/lib/notifications';
+import { usePlaybackSettings } from '~/lib/playback-settings';
+import { preferredStreamQuality, voiceKey } from '~/lib/streams';
 import {
   formatTime,
   groupKey,
@@ -22,7 +26,13 @@ import {
 } from '~/lib/player';
 import { readJSON, writeJSON } from '~/lib/storage';
 import type { Video } from '~/lib/types';
+import { watchFrameKey } from '~/lib/watch-frames';
 
+import {
+  EpisodeDownloadToolbar,
+  EpisodeWithDownload,
+  useEpisodeDownloads,
+} from './EpisodeDownload';
 import type { TPlayerProps } from './Player.types';
 import { PlayerSelect } from './PlayerSelect';
 import { WatchPicker } from './WatchPicker';
@@ -46,6 +56,8 @@ import {
   Toggle,
 } from '~/ui';
 
+const EMPTY_VIDEOS: Video[] = [];
+
 export const SourcePlayer: FC<TPlayerProps> = ({
   anime,
   history,
@@ -57,6 +69,7 @@ export const SourcePlayer: FC<TPlayerProps> = ({
   preferredVoice,
   preferredEpisode,
   startPlaying,
+  newWatch,
 }) => {
   const session = useSession();
   const mobile = useMediaQuery('(max-width: 760px)');
@@ -90,6 +103,14 @@ export const SourcePlayer: FC<TPlayerProps> = ({
   );
   const selectionScope = `${anime.anime_id}:${scope}:${preferredVoice || ''}:${preferredEpisode || ''}`;
   const initialized = useRef(selectionScope);
+  const voiceChoice = useRef<VoiceChoice>('default');
+  const transfer = useRef<{
+    scope: string;
+    videoId: number;
+    position: number;
+    duration: number;
+    playing: boolean;
+  }>();
 
   useEffect(() => {
     if (!groups.size) return;
@@ -100,14 +121,21 @@ export const SourcePlayer: FC<TPlayerProps> = ({
       return;
     initialized.current = selectionScope;
 
-    const all = [...groups.values()].flatMap(group => group.videos);
+    const videos = [...groups.values()].flatMap(group => group.videos);
+    const all =
+      newWatch && !history ? videos.map(video => ({ ...video, watched: undefined })) : videos;
+    const ranked = newWatch && !history && !preferredVoice && !preferredEpisode && rankedStart(all);
+    voiceChoice.current = preferredVoice ? 'explicit' : ranked ? 'ranked' : 'default';
     let resume =
       resumeVideo(
         preferredVoice ? all.filter(video => video.data.dubbing === preferredVoice) : all,
         history
       ) || resumeVideo(all, history);
 
-    if (!preferredVoice && !history && !all.some(video => video.watched?.date)) {
+    if (ranked) resume = ranked;
+    else if (newWatch && !history && !preferredVoice && !preferredEpisode)
+      resume = firstEpisode(all) || resume;
+    else if (!preferredVoice && !history && !all.some(video => video.watched?.date)) {
       const preferred = readJSON<{ dubbing?: string; player?: number }>(
         'yumiwatch:player-preference',
         {}
@@ -132,6 +160,15 @@ export const SourcePlayer: FC<TPlayerProps> = ({
   const videos = groups.get(selectedGroup)?.videos || [];
   const current = videos.find(video => video.number === selectedEpisode) || videos[0];
 
+  const settings = usePlaybackSettings();
+  const episodeDownloads = useEpisodeDownloads({
+    open: episodesOpen,
+    anime,
+    videos: resource.value?.data || EMPTY_VIDEOS,
+    voice: current?.data.dubbing || '',
+    quality: preferredStreamQuality(settings.quality),
+  });
+
   const index = current ? videos.findIndex(video => video.video_id === current.video_id) : -1;
   const selectVideo = useCallback((video: Video) => {
     writeJSON('yumiwatch:player-preference', {
@@ -142,6 +179,11 @@ export const SourcePlayer: FC<TPlayerProps> = ({
     setSelectedEpisode(video.number);
   }, []);
 
+  const playbackRun = useMemo(() => Date.now(), [scope, anime.anime_id, current?.number]);
+  const positionTransfer =
+    transfer.current?.scope === selectionScope && transfer.current.videoId === current?.video_id
+      ? transfer.current
+      : undefined;
   const {
     iframe,
     initial,
@@ -155,14 +197,22 @@ export const SourcePlayer: FC<TPlayerProps> = ({
     loaded,
   } = useSourcePlayback({
     anime,
-    video: current,
+    video:
+      current && isContinueHidden(anime.anime_id) ? { ...current, watched: undefined } : current,
     history,
+    run: playbackRun,
+    voiceChoice: voiceChoice.current,
+    transfer: positionTransfer,
     scope,
     token: session?.token || null,
     startPlaying,
     autoNext,
     next: videos[index + 1],
-    onEnded: selectVideo,
+    onEnded: video => {
+      if (voiceChoice.current === 'explicit') voiceChoice.current = 'default';
+      transfer.current = undefined;
+      selectVideo(video);
+    },
     onCheckpoint,
   });
   const { error: fullscreenError, toggle: toggleFullscreen } = useFullscreen(iframe);
@@ -193,7 +243,7 @@ export const SourcePlayer: FC<TPlayerProps> = ({
   );
 
   const choose = useCallback(
-    (video: Video | undefined, closeOverlay = true) => {
+    (video: Video | undefined, closeOverlay = true, changeVoice = false) => {
       if (!video) return;
       flush();
       if (closeOverlay) {
@@ -206,11 +256,46 @@ export const SourcePlayer: FC<TPlayerProps> = ({
               ?.scrollIntoView?.({ block: 'start', behavior: 'instant' })
           );
       }
-      requestPlay();
+      if (
+        changeVoice &&
+        current &&
+        video.number === current.number &&
+        video.video_id !== current.video_id
+      ) {
+        const saved = presence?.videoId === current.video_id ? presence : positionTransfer;
+        transfer.current = {
+          scope: selectionScope,
+          videoId: video.video_id,
+          position: saved?.position ?? position,
+          duration: saved?.duration ?? duration,
+          playing: saved?.playing ?? false,
+        };
+        voiceChoice.current = 'explicit';
+        requestPlay(transfer.current.playing);
+      } else {
+        transfer.current = undefined;
+        if (current?.number !== video.number && voiceChoice.current === 'explicit')
+          voiceChoice.current = 'default';
+        requestPlay();
+      }
       selectVideo(video);
       if (current?.video_id === video.video_id) send('play');
     },
-    [panel, onPanelChange, mobile, current, send, flush, requestPlay, selectVideo]
+    [
+      panel,
+      onPanelChange,
+      mobile,
+      current,
+      send,
+      flush,
+      requestPlay,
+      selectVideo,
+      presence,
+      positionTransfer,
+      position,
+      duration,
+      selectionScope,
+    ]
   );
 
   const dubbings = useMemo(
@@ -228,8 +313,9 @@ export const SourcePlayer: FC<TPlayerProps> = ({
 
     for (const group of groups.values()) {
       const name = group.videos[0].data.dubbing;
-
-      if (!voices.has(name)) voices.set(name, group.videos);
+      const old =
+        [...voices.keys()].find(existing => voiceKey(existing) === voiceKey(name)) || name;
+      voices.set(old, [...(voices.get(old) || []), ...group.videos]);
     }
 
     const choices =
@@ -249,7 +335,9 @@ export const SourcePlayer: FC<TPlayerProps> = ({
       .filter(option => option.label.toLocaleLowerCase().includes(sourceQuery.toLocaleLowerCase()))
       .map(option => ({
         ...option,
-        video: option.videos.find(video => video.number === current.number) || option.videos[0],
+        video:
+          option.videos.find(video => video.number === current.number) ||
+          (overlay === 'dubbing' ? undefined : option.videos[0]),
       }));
   }, [groups, providers, overlay, current, sourceQuery]);
 
@@ -257,9 +345,9 @@ export const SourcePlayer: FC<TPlayerProps> = ({
     (video: Video) => {
       if (current && video.number !== current.number)
         notify(`Серия ${current.number} здесь недоступна. Выбрана серия ${video.number}.`);
-      choose(video);
+      choose(video, true, overlay === 'dubbing');
     },
-    [current, choose]
+    [current, choose, overlay]
   );
 
   const episodeCards = useMemo(() => {
@@ -323,10 +411,18 @@ export const SourcePlayer: FC<TPlayerProps> = ({
 
   const changeVoice = useCallback(
     (value: string) => {
-      const match = [...groups.values()].find(group => group.videos[0].data.dubbing === value);
-
-      if (match)
-        choose(match.videos.find(video => video.number === current.number) || match.videos[0]);
+      if (!current) return;
+      const video = [...groups.values()]
+        .flatMap(group => group.videos)
+        .find(
+          video =>
+            voiceKey(video.data.dubbing) === voiceKey(value) && video.number === current.number
+        );
+      if (!video) {
+        notify(`Серия ${current.number} недоступна в этой озвучке.`);
+        return;
+      }
+      choose(video, true, voiceKey(value) !== voiceKey(current.data.dubbing));
     },
     [groups, choose, current]
   );
@@ -415,37 +511,47 @@ export const SourcePlayer: FC<TPlayerProps> = ({
           onInput={changeEpisodeQuery}
         />
       )}
-      <div class={`episode-cards ${showPreviews ? '' : 'numbers-only'}`} aria-label="Выбор серии">
+      <EpisodeDownloadToolbar controls={episodeDownloads} onClick={closeEpisodes} />
+      <div
+        class={`episode-cards${showPreviews ? '' : ' numbers-only'}${episodeDownloads ? ' episodes-with-downloads' : ''}`}
+        aria-label="Выбор серии"
+      >
         {episodeCards.map(({ video, frame, saved, percent, preview }) => (
-          <button
+          <EpisodeWithDownload
             key={video.video_id}
-            class={current.video_id === video.video_id ? 'episode-card selected' : 'episode-card'}
-            aria-label={`Серия ${video.number}`}
-            aria-pressed={current.video_id === video.video_id}
-            onClick={() => choose(video)}
+            episode={video.number}
+            selected={current.video_id === video.video_id}
+            downloads={episodeDownloads?.forEpisode}
+            onOpenSaved={closeEpisodes}
           >
-            {showPreviews && (
-              <EpisodePreview
-                src={preview}
-                alt={frame ? `Кадр серии ${video.number}` : ''}
-                poster={!frame}
-                progress={percent}
-                duration={saved.duration > 0 ? formatTime(saved.duration) : undefined}
-                icon={current.video_id !== video.video_id && percent >= 95 ? 'check' : 'play'}
-                hideBrokenImage
-              />
-            )}
-            <EpisodeCaption title={showPreviews ? `Серия ${video.number}` : video.number}>
-              {showPreviews &&
-                (saved.position > 0
-                  ? `Просмотрено ${formatTime(saved.position)}`
-                  : current.video_id === video.video_id
-                    ? 'Выбрана'
-                    : frame
-                      ? 'Смотреть'
-                      : 'Без превью')}
-            </EpisodeCaption>
-          </button>
+            <button
+              class={current.video_id === video.video_id ? 'episode-card selected' : 'episode-card'}
+              aria-label={`Серия ${video.number}`}
+              aria-pressed={current.video_id === video.video_id}
+              onClick={() => choose(video)}
+            >
+              {showPreviews && (
+                <EpisodePreview
+                  src={preview}
+                  frameKey={watchFrameKey(anime.anime_id, video.number, session?.user.id)}
+                  alt={frame ? `Кадр серии ${video.number}` : ''}
+                  poster={!frame}
+                  progress={percent}
+                  duration={saved.duration > 0 ? formatTime(saved.duration) : undefined}
+                  icon={current.video_id !== video.video_id && percent >= 95 ? 'check' : 'play'}
+                  hideBrokenImage
+                />
+              )}
+              <EpisodeCaption title={showPreviews ? `Серия ${video.number}` : video.number}>
+                {showPreviews &&
+                  (saved.position > 0
+                    ? `Просмотрено ${formatTime(saved.position)}`
+                    : current.video_id === video.video_id
+                      ? 'Выбрана'
+                      : 'Смотреть')}
+              </EpisodeCaption>
+            </button>
+          </EpisodeWithDownload>
         ))}
       </div>
     </>
@@ -468,7 +574,7 @@ export const SourcePlayer: FC<TPlayerProps> = ({
           <iframe
             ref={iframe}
             key={current.video_id}
-            src={playbackUrl(current, initial.position)}
+            src={playbackUrl(current, initial.position, !!positionTransfer)}
             title={`${anime.title} — серия ${current.number}, ${current.data.dubbing}`}
             allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
             allowFullScreen
@@ -603,7 +709,8 @@ export const SourcePlayer: FC<TPlayerProps> = ({
                   label={option.label}
                   description={`${option.videos.length} серий`}
                   selected={option.selected}
-                  onClick={() => chooseOption(option.video)}
+                  disabled={!option.video}
+                  onClick={() => option.video && chooseOption(option.video)}
                 />
               ))}
             </div>

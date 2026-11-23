@@ -157,7 +157,9 @@ export const StreamMedia: FC<TStreamMediaProps> = ({
       if (time > 0 && Math.abs(element.currentTime - time) > 0.01)
         element.currentTime = Math.min(
           time,
-          Number.isFinite(element.duration) ? Math.max(0, element.duration) : time
+          Number.isFinite(element.duration) && time > element.duration
+            ? Math.max(0, element.duration - 0.25)
+            : time
         );
     };
 

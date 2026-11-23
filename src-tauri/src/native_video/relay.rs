@@ -24,6 +24,9 @@ struct Relay {
 }
 
 fn resource_path(path: &str) -> Option<&str> {
+    if download_resource(path) {
+        return Some(path);
+    }
     let path = path.split_once('.').map_or(path, |(path, _)| path);
     let (source, ids) = path.strip_prefix('/')?.split_once('/')?;
     let (session, resource) = ids.split_once('/')?;
@@ -34,6 +37,16 @@ fn resource_path(path: &str) -> Option<&str> {
                 .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
     };
     (matches!(source, "alloha" | "media") && hex(session) && hex(resource)).then_some(path)
+}
+
+fn download_resource(path: &str) -> bool {
+    #[cfg(desktop)]
+    return crate::downloads::route(path).is_some();
+    #[cfg(not(desktop))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 pub(super) async fn media_url(
@@ -59,7 +72,11 @@ pub(super) async fn media_url(
             .await
             .map_err(|error| format!("Не удалось подключить транспорт libmpv: {error}"))?;
         Ok((
-            format!("http://{}/{}{path}.{extension}", relay.address, relay.key),
+            if download_resource(path) {
+                format!("http://{}/{}{path}", relay.address, relay.key)
+            } else {
+                format!("http://{}/{}{path}.{extension}", relay.address, relay.key)
+            },
             true,
         ))
     } else if url.scheme() == "https" && !host.is_empty() {
@@ -144,7 +161,7 @@ async fn serve(
     // The native CVH backend limits each read to 8 MiB. Present a continuous,
     // seekable response to FFmpeg while fetching the rest in bounded chunks.
     let body = if request.method() == Method::GET
-        && path.starts_with("/media/")
+        && (path.starts_with("/media/") || path.starts_with("/downloads/"))
         && parts.status == StatusCode::PARTIAL_CONTENT
     {
         let span = Span::from_headers(&parts.headers, bytes.len());

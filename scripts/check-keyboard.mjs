@@ -29,8 +29,18 @@ const styles = await Promise.all(
     'desktop.css',
     'interaction.css',
     'touch.css',
+    'tv.css',
   ].map(name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8'))
 );
+
+const focusedCardRing = () => {
+  const image = document.activeElement.closest('[data-gallery-item]')?.querySelector('.card-image');
+  if (!image) return null;
+  const { borderTopWidth, borderTopStyle, borderTopColor } = getComputedStyle(image, '::before');
+  return [borderTopWidth, borderTopStyle, borderTopColor];
+};
+
+const cardRing = ['2px', 'solid', 'rgb(255, 205, 189)'];
 
 await mkdir('/private/tmp/yumiwatch-keyboard-qa', { recursive: true });
 for (const engine of [webkit, chromium]) {
@@ -42,7 +52,8 @@ for (const engine of [webkit, chromium]) {
 
     page.on('pageerror', error => errors.push(error.message));
     await page.route('https://keyboard.test/**', async route => {
-      const name = new URL(route.request().url()).pathname.slice(1);
+      const url = new URL(route.request().url());
+      const name = url.pathname.slice(1);
 
       if (name.endsWith('.woff2'))
         return route.fulfill({
@@ -53,7 +64,7 @@ for (const engine of [webkit, chromium]) {
 
       return route.fulfill({
         contentType: 'text/html',
-        body: '<!doctype html><html data-desktop="macos"><body><div id="app"></div></body></html>',
+        body: `<!doctype html><html ${url.searchParams.has('tv') ? 'data-tv="true" data-mobile="android"' : 'data-desktop="macos"'}><body><div id="app"></div></body></html>`,
       });
     });
     await page.goto('https://keyboard.test/#/');
@@ -83,6 +94,10 @@ for (const engine of [webkit, chromium]) {
     await page.locator('.media-nav').getByRole('link', { name: 'Каталог', exact: true }).focus();
     await page.keyboard.press('ArrowDown');
     assert.equal(await page.evaluate(() => document.activeElement.textContent.trim()), 'Все аниме');
+    assert.equal(
+      await page.evaluate(() => getComputedStyle(document.activeElement).backgroundColor),
+      'rgb(74, 53, 54)'
+    );
     await page.keyboard.press('Enter');
     await page.waitForFunction(
       () =>
@@ -102,24 +117,49 @@ for (const engine of [webkit, chromium]) {
       'Arrow focused a retained hidden route'
     );
 
-    const visibleCard = () =>
-      page.waitForFunction(() => {
-        const node = document.activeElement,
-          card = node.closest('[data-gallery-item]');
+    const visibleCard = async () => {
+      try {
+        await page.waitForFunction(
+          () => {
+            const node = document.activeElement,
+              card = node.closest('[data-gallery-item]');
 
-        if (!card) return false;
+            if (!card) return false;
 
-        const r = card.getBoundingClientRect(),
-          rail = card.closest('.gallery-rail').getBoundingClientRect(),
-          main = document.getElementById('main').getBoundingClientRect();
+            const r = card.getBoundingClientRect(),
+              rail = card.closest('.gallery-rail').getBoundingClientRect(),
+              main = document.getElementById('main').getBoundingClientRect();
 
-        return (
-          r.top >= Math.max(main.top + 56, 0) - 1 &&
-          r.bottom <= Math.min(main.bottom, innerHeight) - 8 &&
-          r.left >= rail.left + 2 &&
-          r.right <= rail.right - 2
+            return (
+              r.top >= Math.max(main.top + 56, 0) - 1 &&
+              r.bottom <= Math.min(main.bottom, innerHeight) - 8 &&
+              r.left >= rail.left + 2 &&
+              r.right <= rail.right - 2
+            );
+          },
+          undefined,
+          { timeout: 6000 }
         );
-      });
+      } catch (error) {
+        const focused = await page.evaluate(() => {
+          const active = document.activeElement,
+            card = active.closest('[data-gallery-item]'),
+            rail = card?.closest('.gallery-rail'),
+            main = document.getElementById('main');
+
+          return {
+            label: active.textContent.trim().slice(0, 80),
+            card: card?.getBoundingClientRect().toJSON(),
+            rail: rail?.getBoundingClientRect().toJSON(),
+            main: main.getBoundingClientRect().toJSON(),
+            scrollTop: main.scrollTop,
+          };
+        });
+        throw new Error(`The focused card is not fully visible: ${JSON.stringify(focused)}`, {
+          cause: error,
+        });
+      }
+    };
 
     await visibleCard();
     for (let index = 0; index < 9; index++) {
@@ -140,36 +180,45 @@ for (const engine of [webkit, chromium]) {
     }
     assert.equal(await page.evaluate(() => document.activeElement.dataset.index), '9');
     await visibleCard();
-    const focusStyle = await page.evaluate(() => {
-      const card = document.activeElement.closest('[data-gallery-item]');
-
-      return {
-        outline: getComputedStyle(card).outlineStyle,
-        decoration: getComputedStyle(card.querySelector('.card-title')).textDecorationLine,
-      };
-    });
-
-    assert.equal(focusStyle.outline, 'none', 'Keyboard focus adds a frame around the card');
-    assert.ok(
-      focusStyle.decoration.includes('underline'),
-      'Focused title has no visible indicator'
-    );
-    await page.keyboard.press('ArrowDown');
-    await visibleCard();
-    assert.equal(
-      await page.evaluate(() =>
-        document.activeElement.closest('.gallery-shelf').getAttribute('aria-label')
-      ),
-      'Ряд 1'
-    );
-    await page.keyboard.press('ArrowDown');
-    await visibleCard();
-    assert.equal(
-      await page.evaluate(() =>
-        document.activeElement.closest('.gallery-shelf').getAttribute('aria-label')
-      ),
-      'Ряд 2'
-    );
+    assert.deepEqual(await page.evaluate(focusedCardRing), cardRing);
+    for (const shelf of ['Ряд 1', 'Ряд 2']) {
+      const all = page.getByRole('region', { name: shelf, exact: true }).getByRole('link', {
+        name: 'Все',
+        exact: true,
+      });
+      const actionPositions = () =>
+        all.evaluate(link => {
+          const actions = link.parentElement;
+          const { left, top } = actions.getBoundingClientRect();
+          const label = document.createRange();
+          label.selectNodeContents(link.firstChild);
+          return [label, link.querySelector('svg'), ...actions.children].map(node => {
+            const rect = node.getBoundingClientRect();
+            return [rect.left - left, rect.top - top, rect.width, rect.height];
+          });
+        });
+      const beforeFocus = await actionPositions();
+      await page.keyboard.press('ArrowDown');
+      assert.equal(
+        await page.evaluate(() =>
+          document.activeElement
+            .closest('.gallery-shelf-actions')
+            ?.closest('.gallery-shelf')
+            .getAttribute('aria-label')
+        ),
+        shelf
+      );
+      assert.equal(await all.evaluate(link => getComputedStyle(link).outlineOffset), '5px');
+      assert.deepEqual(await actionPositions(), beforeFocus);
+      await page.keyboard.press('ArrowDown');
+      await visibleCard();
+      assert.equal(
+        await page.evaluate(() =>
+          document.activeElement.closest('.gallery-shelf').getAttribute('aria-label')
+        ),
+        shelf
+      );
+    }
     assert.equal(await page.evaluate(() => scrollY), 0);
     await page.screenshot({ path: `/private/tmp/yumiwatch-keyboard-qa/${engine.name()}-card.png` });
     await page.setViewportSize({ width: 1100, height: 480 });
@@ -183,6 +232,28 @@ for (const engine of [webkit, chromium]) {
         document.activeElement.getAttribute('href')
     );
 
+    const poster = page.locator('[data-route]:not([hidden]) article').filter({
+      has: page.locator(`.card-title[data-app-href="${destination}"]`),
+    });
+    await page.mouse.move(800, 40);
+    await page.waitForFunction(
+      () =>
+        document.documentElement.dataset.inputMode === 'pointer' &&
+        !document.activeElement.matches('[data-gallery-link]')
+    );
+    assert.equal(
+      await poster
+        .locator('.card-image')
+        .evaluate(node => getComputedStyle(node, '::before').borderTopStyle),
+      'none'
+    );
+    await page.keyboard.press('ArrowDown');
+    await visibleCard();
+    assert.deepEqual(await page.evaluate(focusedCardRing), cardRing);
+    assert.equal(
+      await page.evaluate(() => document.activeElement.getAttribute('data-app-href')),
+      destination
+    );
     await page.keyboard.press('Enter');
     await page.waitForFunction(hash => location.hash === hash, destination);
     console.log(
@@ -355,7 +426,17 @@ for (const engine of [webkit, chromium]) {
     );
     await page.getByRole('button', { name: 'Открыть серии', exact: true }).click();
     await page.getByRole('button', { name: 'Закрыть панель', exact: true }).waitFor();
-    await page.waitForFunction(() => document.activeElement.matches('.sidebar-close'));
+    assert.equal(await page.evaluate(() => document.documentElement.dataset.inputMode), 'pointer');
+    assert.equal(
+      await page.evaluate(() => document.activeElement.matches('.sidebar-close')),
+      false
+    );
+    await page.keyboard.press('ArrowDown');
+    await page.waitForFunction(() => document.activeElement.textContent.trim() === 'Серия 1');
+    assert.equal(
+      await page.evaluate(() => getComputedStyle(document.activeElement).outlineColor),
+      cardRing[2]
+    );
 
     const navBefore = await page.locator('.media-nav').evaluate(node => node.scrollTop);
 
@@ -380,6 +461,51 @@ for (const engine of [webkit, chromium]) {
     });
     assert.deepEqual(errors, []);
     console.log(engine.name(), 'short menu, Tab, sidebar visibility and stationary root OK');
+
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto('https://keyboard.test/?tv=1#/');
+    for (const content of styles) await page.addStyleTag({ content });
+    await page.addScriptTag({ content: bundle });
+    const focused = () => page.evaluate(() => document.activeElement.textContent.trim());
+    await page.waitForFunction(() => document.activeElement.matches('[data-gallery-link]'));
+    assert.deepEqual(await page.evaluate(focusedCardRing), cardRing);
+    const homeCard = await focused();
+    await page.keyboard.press('ArrowRight');
+    assert.equal(await focused(), '/ · Аниме 1');
+    await page.keyboard.press('ArrowLeft');
+    assert.equal(await focused(), homeCard);
+    await page.keyboard.press('ArrowLeft');
+    assert.equal(await focused(), 'Каталог');
+    await page.keyboard.press('ArrowRight');
+    assert.equal(await focused(), homeCard);
+    await page.keyboard.press('ArrowLeft');
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await focused(), 'Все аниме');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(
+      () => location.hash === '#/catalog' && document.activeElement.matches('[data-gallery-link]')
+    );
+    const opener = page.getByRole('button', { name: 'Открыть серии', exact: true });
+    await opener.focus();
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => document.activeElement.textContent.trim() === 'Серия 1');
+    for (let index = 0; index < 16; index++) await page.keyboard.press('ArrowDown');
+    assert.equal(await focused(), 'Серия 17');
+    await page.waitForFunction(() => {
+      const control = document.activeElement.getBoundingClientRect();
+      const scroll = document.querySelector('.sidebar-scroll').getBoundingClientRect();
+      return control.top >= scroll.top + 39 && control.bottom <= scroll.bottom - 39;
+    });
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => document.activeElement.textContent.trim() === 'Открыть серии');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(
+      () => location.hash === '#/' && document.activeElement.matches('[data-gallery-link]')
+    );
+    assert.equal(await focused(), homeCard);
+    assert.equal(await page.evaluate(() => scrollY), 0);
+    assert.deepEqual(errors, []);
+    console.log(engine.name(), 'TV arrows, sidebar confinement and focus restoration OK');
   } finally {
     await browser.close();
   }

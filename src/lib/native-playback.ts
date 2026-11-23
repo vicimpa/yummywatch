@@ -1,4 +1,4 @@
-import { desktopInvoke, isDesktop } from './desktop';
+import { desktopInvoke, hasAndroidMpv, isDesktop } from './desktop';
 import type { PlaybackClosePositions, PlaybackMedia } from './playback-media';
 import type { PlaybackSettings, UpscaleMode, UpscaleSharpness } from './playback-settings';
 import type { Stream, StreamCaption } from './streams';
@@ -8,6 +8,8 @@ export const usesMacNativePlayback = () =>
 
 export const usesCanvasPlayback = () =>
   isDesktop() && ['linux', 'windows'].includes(document.documentElement.dataset.desktop || '');
+
+export const usesAndroidNativePlayback = hasAndroidMpv;
 
 export const RETURN_TO_PLAYER_EVENT = 'yumiwatch:return-to-player';
 
@@ -72,7 +74,8 @@ function frameBlob(response: ArrayBuffer | number[] | undefined) {
   if (bytes.byteLength) return new Blob([bytes], { type: 'image/jpeg' });
 }
 
-let nextId = 0;
+// A fresh WebView may open a stream while native sessions from the old page are closing.
+let nextId = Math.floor(Math.random() * 2 ** 30);
 
 export class NativePlayback extends EventTarget implements PlaybackMedia {
   readonly id = ++nextId;
@@ -106,9 +109,10 @@ export class NativePlayback extends EventTarget implements PlaybackMedia {
   private canvas?: HTMLCanvasElement;
   private animation = 0;
   private frameSize = { width: 640, height: 360 };
-  readonly previewFrame = usesCanvasPlayback()
-    ? undefined
-    : (seconds: number) => this.requestFrame(false, seconds);
+  readonly previewFrame =
+    usesCanvasPlayback() || usesAndroidNativePlayback()
+      ? undefined
+      : (seconds: number) => this.requestFrame(false, seconds);
 
   constructor(url: string) {
     super();

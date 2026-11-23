@@ -9,7 +9,7 @@
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: rgb(41 43 48 / 96%);
+  background: var(--menu-surface);
   color: var(--text);
   box-shadow: 0 16px 48px #0008;
   font-size: 13px;

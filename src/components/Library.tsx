@@ -9,9 +9,9 @@ import type { Anime } from '~/lib/types';
 import { FavoriteButton } from './FavoriteButton';
 import { Button, FormError, Icon, Sheet } from '~/ui';
 
-export type TAnimeListButtonProps = { anime: Anime };
+export type TAnimeListButtonProps = { anime: Anime; gridAction?: boolean };
 
-export const AnimeListButton: FC<TAnimeListButtonProps> = ({ anime }) => {
+export const AnimeListButton: FC<TAnimeListButtonProps> = ({ anime, gridAction }) => {
   const library = useLibrary();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -62,6 +62,7 @@ export const AnimeListButton: FC<TAnimeListButtonProps> = ({ anime }) => {
     <div class="detail-list-control">
       <Button
         aria-haspopup="dialog"
+        data-virtual-secondary={gridAction || undefined}
         disabled={library.loading}
         onClick={openLists}
         class="list-status-button"

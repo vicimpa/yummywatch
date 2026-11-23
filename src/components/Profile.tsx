@@ -226,7 +226,7 @@ const ProfileCollection: FC<{
           ? `${own ? 'Моя оценка' : 'Оценка профиля'}: ${personalRating(anime)} / 10`
           : 'Без оценки'}
       </p>
-      {own && <AnimeListButton anime={anime} />}
+      {own && <AnimeListButton anime={anime} gridAction />}
     </div>
   );
 
@@ -336,7 +336,7 @@ const ProfileCollection: FC<{
 };
 
 const ContinueWatching: FC<{ history: WatchEntry[] }> = ({ history }) => (
-  <section class="profile-panel profile-continue">
+  <section class="profile-panel profile-continue" data-tv-focus-group>
     <SectionHeading
       title="История продолжается"
       subtitle="Твоё место сохранено"
@@ -629,7 +629,7 @@ export const ProfilePage: FC<{ query: string; userId?: number }> = ({ query, use
         </div>
       </header>
 
-      <nav class="profile-tabs" aria-label="Разделы профиля">
+      <nav class="profile-tabs" aria-label="Разделы профиля" data-tv-tabs>
         {tabs.map(item => (
           <AppLink
             key={item.id}
@@ -647,7 +647,7 @@ export const ProfilePage: FC<{ query: string; userId?: number }> = ({ query, use
       {resource.value?.cached && !resource.refreshing && (
         <CachedNotice savedAt={resource.value.savedAt} refreshing={resource.refreshing} />
       )}
-      {own && !session && (
+      {own && !session && tab !== 'friends' && (
         <div class="profile-notice">
           <Icon name="bookmark" size={18} />
           <p>
@@ -702,12 +702,29 @@ export const ProfilePage: FC<{ query: string; userId?: number }> = ({ query, use
       ) : tab === 'stats' ? (
         <ProfileStats profile={profile} id={allowed ? id : undefined} animes={animes} />
       ) : tab === 'friends' ? (
-        <ProfileFriends key={`${id}:${session?.token}`} id={allowed ? id : undefined} />
+        session?.verified ? (
+          <ProfileFriends key={`${id}:${session.token}`} id={id} />
+        ) : session ? null : (
+          <Empty
+            icon="user"
+            title="Войди, чтобы найти друзей"
+            action={
+              <ButtonLink
+                href={`#/account?next=${encodeURIComponent(`${href.slice(1)}?tab=friends`)}`}
+                variant="primary"
+              >
+                Войти в YummyAnime
+              </ButtonLink>
+            }
+          >
+            После входа здесь появятся поиск людей и список друзей.
+          </Empty>
+        )
       ) : (
         <div class="profile-overview">
-          <div class="profile-overview-main">
+          <div class="profile-overview-main" data-tv-profile-column>
             {own && <ContinueWatching history={library.history} />}
-            <section class="profile-panel">
+            <section class="profile-panel" data-tv-focus-group>
               <SectionHeading
                 title={own ? 'Всё на своих местах' : 'Коллекция'}
                 subtitle="От первой серии до финальных титров"
@@ -739,7 +756,7 @@ export const ProfilePage: FC<{ query: string; userId?: number }> = ({ query, use
             </section>
             <ProfileActivity profile={profile} />
             {favorites.length > 0 && (
-              <section class="profile-panel">
+              <section class="profile-panel" data-tv-focus-group>
                 <SectionHeading
                   title="Особое место"
                   subtitle="Истории, которые хочется сохранить"
@@ -754,9 +771,9 @@ export const ProfilePage: FC<{ query: string; userId?: number }> = ({ query, use
               </section>
             )}
           </div>
-          <aside class="profile-overview-side">
+          <aside class="profile-overview-side" data-tv-profile-column>
             <ProfileTaste id={allowed ? id : undefined} animes={animes} />
-            <section class="profile-panel profile-shortcuts">
+            <section class="profile-panel profile-shortcuts" data-tv-focus-group>
               <SectionHeading title="Под рукой" />
               {own && (
                 <>

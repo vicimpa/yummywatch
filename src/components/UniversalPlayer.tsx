@@ -8,9 +8,14 @@ import { useDiscordPresence } from '~/hooks/useDiscordPresence';
 import { useAnimeDiscordContext } from '~/hooks/useAnimeDiscordContext';
 import { animeVideos, imageUrl, peekAnimeVideos } from '~/lib/api';
 import { probeAudioPlayback } from '~/lib/autoplay';
-import { isDesktop } from '~/lib/desktop';
+import { isContinueHidden } from '~/lib/continue-cache';
+import { isDesktop, isDesktopWindow } from '~/lib/desktop';
+import { cancelDownloadPrefetch, prefetchDownloadEpisode } from '~/lib/downloads';
 import { useResource, useSession } from '~/lib/hooks';
+import { firstEpisode, rankedStart, type VoiceChoice } from '~/lib/voice-ranking';
+import { episodePlayback } from '~/lib/playback-recovery';
 import { mediaAtEnd } from '~/lib/media-state';
+import { notify } from '~/lib/notifications';
 import { selectedPlaybackRate, setPlaybackRate } from '~/lib/playback-rate';
 import {
   createPlaybackSession,
@@ -23,7 +28,8 @@ import {
   savePlaybackSettings,
   usePlaybackSettings,
 } from '~/lib/playback-settings';
-import { formatTime, groupKey, resumeVideo, videoPosition } from '~/lib/player';
+import { formatTime, groupKey, resumeVideo, videoPosition, watchMatchesVideo } from '~/lib/player';
+import { isProxyEligibleError, saveProxyEnabled, useProxyEnabled } from '~/lib/proxy-settings';
 import { readJSON, writeJSON } from '~/lib/storage';
 import {
   inspectStreamQualities,
@@ -32,6 +38,7 @@ import {
   resolveStream,
   selectStream,
   streamSourceFamily,
+  streamCandidates,
   voiceKey,
   voiceVideos,
   type Stream,
@@ -43,12 +50,14 @@ import { useCachedImage } from '~/hooks/useCachedImage';
 import { useWatchFrame } from '~/hooks/useWatchFrame';
 import { watchFrameKey } from '~/lib/watch-frames';
 
+import { EpisodeDownloadToolbar, useEpisodeDownloads } from './EpisodeDownload';
 import { PlaybackLoader } from './PlaybackLoader';
 import { PictureInPictureButton } from './PictureInPictureButton';
 import { AutoPictureInPictureSetting, AutoSkipSettings } from './PlaybackSettings';
 import type { TPlayerProps } from './Player.types';
 import { EpisodeOptions, SourceOptions, VoiceOptions } from './PlayerOptions';
 import { STREAM_ERROR_DELAY_MS, STREAM_RESUME_REFRESH_MS, VideoSurface } from './VideoSurface';
+import type { TvEpisodeControl } from '~/lib/tv-mode';
 import { WatchPicker } from './WatchPicker';
 import {
   Button,
@@ -61,6 +70,15 @@ import {
   Sidebar,
   Toggle,
 } from '~/ui';
+
+function voiceVoteOnce() {
+  let available = true;
+  return () => {
+    const voted = available;
+    available = false;
+    return voted;
+  };
+}
 
 const snapshotFields = [
   'videoId',
@@ -92,7 +110,15 @@ function sameSnapshot(previous: PlaybackSnapshot | undefined, next: PlaybackSnap
   );
 }
 
-function resumeSelection(videos: Video[], history?: WatchEntry, preferredVoice?: string) {
+function resumeSelection(
+  videos: Video[],
+  history?: WatchEntry,
+  preferredVoice?: string,
+  ranking = false
+) {
+  if (ranking && !history && !preferredVoice) {
+    return rankedStart(videos) || firstEpisode(videos);
+  }
   const preferred = preferredVoice
     ? videos.filter(video => voiceKey(video.data.dubbing) === voiceKey(preferredVoice))
     : videos;
@@ -102,6 +128,7 @@ function resumeSelection(videos: Video[], history?: WatchEntry, preferredVoice?:
 
 export const UniversalPlayer: FC<TPlayerProps> = ({
   anime,
+  offline,
   history,
   onCheckpoint,
   onPlayback,
@@ -116,20 +143,28 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
   preferredVoice,
   preferredEpisode,
   startPlaying,
+  newWatch,
   presentation,
   onBack,
+  backLabel,
 }) => {
   const immersive = presentation === 'immersive';
   const session = useSession();
   const settings = usePlaybackSettings();
   const resource = useResource(
-    signal => animeVideos(anime.anime_id, signal),
-    [anime.anime_id, session?.token, session?.verified],
-    () => peekAnimeVideos(anime.anime_id)
+    signal =>
+      offline
+        ? Promise.resolve({ data: offline.videos, cached: false, savedAt: 0 })
+        : animeVideos(anime.anime_id, signal),
+    [anime.anime_id, session?.token, session?.verified, offline],
+    () =>
+      offline
+        ? { data: offline.videos, cached: false, savedAt: 0 }
+        : peekAnimeVideos(anime.anime_id)
   );
   const all = resource.value?.data || EMPTY_VIDEOS;
   const initial = useMemo(
-    () => resumeSelection(all, history, preferredVoice),
+    () => resumeSelection(all, history, preferredVoice, newWatch && !preferredEpisode && !offline),
     [all, history, preferredVoice]
   );
   const [voice, setVoice] = useState(() => initial?.data.dubbing || '');
@@ -143,8 +178,18 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       initial?.number ||
       ''
   );
+  const voiceChoice = useRef<VoiceChoice>(
+    preferredVoice && !offline
+      ? 'explicit'
+      : newWatch && !history && !preferredEpisode && rankedStart(all)
+        ? 'ranked'
+        : 'default'
+  );
+  const voiceVote = useRef<() => boolean>(voiceVoteOnce());
+  const playbackRun = useMemo(() => Date.now(), [anime.anime_id, session?.token, episode]);
   const [overlay, setOverlay] = useState<'voice' | 'episodes' | 'player' | null>(null);
   const [query, setQuery] = useState('');
+  const [legacyStream, setLegacyStream] = useState<string>();
 
   useEffect(() => {
     if (panel || background) setOverlay(null);
@@ -188,6 +233,14 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
   const fullscreenFrame = useRef<HTMLDivElement>(null);
   const currentSession = useRef<ReturnType<typeof createPlaybackSession>>();
   const checkpoints = useRef(new Map<number, WatchEntry>());
+  const voiceTransfer = useRef<{
+    scope: string;
+    episode: string;
+    voice: string;
+    position: number;
+    duration: number;
+    playing: boolean;
+  }>();
   const callbacks = useRef({ onCheckpoint, onPlayback });
 
   callbacks.current = { onCheckpoint, onPlayback };
@@ -206,7 +259,21 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       return;
     initialized.current = selectionScope;
 
-    const resumed = resumeSelection(all, history, preferredVoice);
+    const resumed = resumeSelection(
+      all,
+      history,
+      preferredVoice,
+      newWatch && !preferredEpisode && !offline
+    );
+    voiceChoice.current =
+      preferredVoice && !offline
+        ? 'explicit'
+        : newWatch && !history && !preferredEpisode && !offline && rankedStart(all)
+          ? 'ranked'
+          : 'default';
+    if (voiceChoice.current === 'explicit') {
+      voiceVote.current = voiceVoteOnce();
+    }
 
     setVoice(resumed.data.dubbing);
     setEpisode(
@@ -238,26 +305,28 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
   const desktop = isDesktop();
   const sourceChoices = useMemo(
     () =>
-      candidates.flatMap((video): SourceChoice[] => {
-        const provider = streamSourceFamily(video.iframe_url);
-        const videoId = video.video_id;
-        if (!provider || (!desktop && provider !== 'CVH')) return [];
-        if (provider === 'Kodik')
-          return [
-            { value: `${videoId}:hls`, label: 'Kodik · HLS', videoId, format: 'hls' },
-            { value: `${videoId}:mp4`, label: 'Kodik · MP4', videoId, format: 'mp4' },
-          ];
-        return [{ value: String(videoId), label: provider, videoId }];
-      }),
-    [candidates, desktop]
+      offline
+        ? []
+        : candidates.flatMap((video): SourceChoice[] => {
+            const provider = streamSourceFamily(video.iframe_url);
+            const videoId = video.video_id;
+            if (!provider || (!desktop && provider !== 'CVH')) return [];
+            if (provider === 'Kodik')
+              return [
+                { value: `${videoId}:hls`, label: 'Kodik · HLS', videoId, format: 'hls' },
+                { value: `${videoId}:mp4`, label: 'Kodik · MP4', videoId, format: 'mp4' },
+              ];
+            return [{ value: String(videoId), label: provider, videoId }];
+          }),
+    [candidates, desktop, offline]
   );
   const inventory = useResource(
     async signal => ({
-      data: await inspectStreamQualities(candidates, signal),
+      data: offline ? [] : await inspectStreamQualities(candidates, signal),
       cached: false,
       savedAt: Date.now(),
     }),
-    [candidates]
+    [candidates, offline]
   );
   const [sourceChoice, setSourceChoice] = useState<{ scope: string; value: string }>();
   const manualSource =
@@ -309,6 +378,11 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
   const streams = useResource<StreamResult | undefined>(
     async signal => {
       if (!current) return { data: undefined, cached: false, savedAt: 0 };
+      if (offline) {
+        const saved = candidates.find(video => video.video_id === offline.selectedVideoId);
+        const data = offline.sources.get(saved?.video_id ?? current.video_id);
+        return { data, cached: true, savedAt: 0 };
+      }
       const reserveStream = kodikReserves.length
         ? selectStream(
             kodikReserves.flatMap(source => source.streams),
@@ -322,6 +396,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
         try {
           data = await resolveStream(available, signal, {
             preferredVideoId: resolvingId,
+            ...(desktop && { animeId: anime.anime_id }),
             ...(!manualSource && sourceChoices.length && { quality: targetQuality }),
           });
         } catch (error) {
@@ -346,6 +421,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       refreshRequest.revision,
       qualityRevision,
       kodikReserves,
+      offline,
     ]
   );
   const resolved = streams.value?.data;
@@ -368,6 +444,9 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
   }, [failureKey]);
 
   const showStreamError = !!failureKey && settledFailure === failureKey;
+  const proxyEnabled = useProxyEnabled();
+  const [enablingProxy, setEnablingProxy] = useState(false);
+  const suggestProxy = !background && proxyEnabled === false && isProxyEligibleError(streams.error);
   const active =
     all.find(video => video.video_id === result?.videoId) ||
     candidates.find(video => video.video_id === currentSession.current?.snapshot().videoId) ||
@@ -385,14 +464,33 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
     const variants = regular.length && !onlyMp4Matches ? regular : result.streams;
     if (manualSource && !variants.some(stream => stream.quality <= targetQuality))
       return { variants };
-    const stream = selectStream(variants, settings.quality);
+    const managed = selectStream(variants, settings.quality);
+    const stream =
+      managed.legacyUrl && legacyStream === managed.url
+        ? { ...managed, url: managed.legacyUrl, legacyUrl: undefined, captionUrl: undefined }
+        : managed;
     const lowest = variants.reduce(
       (current, variant) => (variant.quality < current.quality ? variant : current),
       stream
     );
     return { selected: stream, previewStream: lowest, variants };
-  }, [result, settings.quality, targetQuality, manualSource]);
+  }, [result, settings.quality, targetQuality, manualSource, legacyStream]);
+  const episodeDownloads = useEpisodeDownloads({
+    open: episodesOpen,
+    anime,
+    videos: all,
+    voice,
+    quality: targetQuality,
+    active: selected && active ? { stream: selected, video: active } : undefined,
+  });
   const qualityUnavailable = !!(manualSource && result && !selected);
+  const caption = useMemo(
+    () =>
+      result?.caption && selected?.captionUrl
+        ? { ...result.caption, url: selected.captionUrl }
+        : result?.caption,
+    [result?.caption, selected?.captionUrl]
+  );
   const qualities = useMemo(
     () =>
       [
@@ -404,16 +502,23 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
     [inventory.value, result]
   );
   const previewEpisode = current?.number || episode || preferredEpisode || history?.episode;
-  const poster = imageUrl(
-    anime.random_screenshots?.find(frame => frame.episode === previewEpisode)?.sizes.small ||
-      (history?.episode === previewEpisode ? history?.preview : undefined) ||
-      anime.poster?.medium ||
-      anime.poster?.big
-  );
+  const localPlayback = !!offline || !!selected?.offline;
+  const titlePoster = imageUrl(anime.poster?.medium || anime.poster?.big);
+  const poster =
+    imageUrl(
+      anime.random_screenshots?.find(frame => frame.episode === previewEpisode)?.sizes.small ||
+        (history?.episode === previewEpisode ? history?.preview : undefined)
+    ) || titlePoster;
   const frameKey = watchFrameKey(anime.anime_id, previewEpisode, session?.user.id);
   const savedFrame = useWatchFrame(frameKey);
-  const fallbackImage = useCachedImage(poster);
-  const loadingImage = savedFrame || fallbackImage;
+  const fallbackImage = useCachedImage(savedFrame ? undefined : poster, !localPlayback);
+  const cachedPoster = useCachedImage(
+    !savedFrame && !fallbackImage && localPlayback && titlePoster !== poster
+      ? titlePoster
+      : undefined,
+    false
+  );
+  const loadingImage = savedFrame || fallbackImage || cachedPoster;
   const skipMarkers = useMemo(
     () => mergeSkips(active?.skips, result?.skips),
     [active?.skips, result?.skips]
@@ -425,28 +530,43 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
     const entries = [...checkpoints.current.values(), ...(history ? [history] : [])]
       .filter(
         entry =>
-          entry.episode === active.number &&
-          all.some(
-            video =>
-              video.video_id === entry.videoId &&
-              voiceKey(video.data.dubbing) === voiceKey(active.data.dubbing)
-          )
+          watchMatchesVideo(entry, active) ||
+          (entry.episode === active.number &&
+            all.some(
+              video =>
+                video.video_id === entry.videoId &&
+                voiceKey(video.data.dubbing) === voiceKey(active.data.dubbing)
+            ))
       )
       .sort((a, b) => b.updatedAt - a.updatedAt);
+    const transfer = voiceTransfer.current;
+    const shared = offline && episodePlayback(anime.anime_id, active.number, history);
     const saved =
-      previous?.episode === active.number &&
-      voiceKey(previous.dubbing) === voiceKey(active.data.dubbing)
-        ? { position: previous.position, duration: previous.duration }
-        : videoPosition(
-            active,
-            entries[0] ? { ...entries[0], videoId: active.video_id } : undefined
-          );
+      transfer?.scope === selectionScope &&
+      transfer.episode === active.number &&
+      transfer.voice === voiceKey(active.data.dubbing)
+        ? transfer
+        : shared
+          ? {
+              position: shared.completed ? 0 : shared.position || 0,
+              duration: shared.duration || 0,
+            }
+          : previous?.episode === active.number &&
+              voiceKey(previous.dubbing) === voiceKey(active.data.dubbing)
+            ? { position: previous.position, duration: previous.duration }
+            : videoPosition(
+                isContinueHidden(anime.anime_id) ? { ...active, watched: undefined } : active,
+                entries[0] ? { ...entries[0], videoId: active.video_id } : undefined
+              );
     const video = active;
 
     return createPlaybackSession({
       anime,
       video,
       token: session?.token || null,
+      run: playbackRun,
+      voiceChoice: voiceChoice.current,
+      voiceVote: voiceVote.current,
       position: saved.position,
       duration: saved.duration,
       onCheckpoint: entry => {
@@ -492,6 +612,54 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
   const position = snapshot?.position || 0,
     duration = snapshot?.duration || result?.duration || 0;
 
+  const prefetchTicket = useRef<string>();
+  const following = videos[index + 1]?.number;
+  const prefetchScope = JSON.stringify([
+    anime.anime_id,
+    session?.user.id,
+    voice,
+    episode,
+    following,
+    selected?.quality,
+  ]);
+  useEffect(() => {
+    prefetchTicket.current = undefined;
+    return () => {
+      if (prefetchTicket.current)
+        void cancelDownloadPrefetch(prefetchTicket.current).catch(() => {});
+    };
+  }, [prefetchScope]);
+  useEffect(() => {
+    if (
+      !isDesktopWindow() ||
+      offline ||
+      !following ||
+      !selected ||
+      prefetchTicket.current ||
+      !snapshot?.playing ||
+      snapshot.watchedSeconds <= 0 ||
+      duration <= 0 ||
+      position / duration <= 0.5 ||
+      navigator.onLine === false
+    )
+      return;
+    const candidates = streamCandidates(
+      all.filter(
+        video => video.number === following && voiceKey(video.data.dubbing) === voiceKey(voice)
+      )
+    ).slice(0, 12);
+    if (!candidates.length) return;
+    const ticket = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    prefetchTicket.current = ticket;
+    void prefetchDownloadEpisode({
+      ticket,
+      animeId: anime.anime_id,
+      episode: following,
+      quality: selected.quality,
+      candidates,
+    }).catch(() => {});
+  }, [prefetchScope, offline, snapshot?.playing, snapshot?.watchedSeconds, duration, position]);
+
   useLayoutEffect(() => {
     const flush = () => currentSession.current?.flush();
 
@@ -536,9 +704,41 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
 
   const choose = useCallback(
     (number: string, nextVoice = voice) => {
+      const snapshot = watch?.snapshot();
+      const pending = voiceTransfer.current;
+      if (current?.number === number && voiceKey(nextVoice) !== voiceKey(voice)) {
+        voiceChoice.current = 'explicit';
+        voiceVote.current = voiceVoteOnce();
+        const element = media.current;
+        const live = !pending && element && element.readyState >= 2 && !element.error && snapshot;
+        const previous =
+          pending?.scope === selectionScope && pending.episode === number ? pending : snapshot;
+        if (live || previous) {
+          voiceTransfer.current = {
+            scope: selectionScope,
+            episode: number,
+            voice: voiceKey(nextVoice),
+            position: live ? element.currentTime : previous!.position,
+            duration: live ? element.duration : previous!.duration,
+            playing: live
+              ? !element.paused && !mediaAtEnd(element)
+              : (recoveryAutoplay.current ?? previous!.playing),
+          };
+        }
+      } else if (number !== current?.number) {
+        voiceTransfer.current = undefined;
+        if (voiceChoice.current === 'explicit') voiceChoice.current = 'default';
+      }
+      if (snapshot && voiceTransfer.current?.episode === number)
+        watch?.update({
+          reason: 'sourcechange',
+          position: voiceTransfer.current.position,
+          duration: voiceTransfer.current.duration,
+          playing: voiceTransfer.current.playing,
+        });
       watch?.flush();
-      autoplay.current = true;
-      recoveryAutoplay.current = undefined;
+      autoplay.current = voiceTransfer.current?.playing ?? true;
+      recoveryAutoplay.current = voiceTransfer.current?.playing;
       recoveryMedia.current = undefined;
       setFailedSources({ scope: '', ids: EMPTY_IDS, kodikReserves: EMPTY_RESERVES });
       setSourceChoice(undefined);
@@ -547,7 +747,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       setOverlay(null);
       if (panel === 'episodes') onPanelChange?.(null);
     },
-    [voice, watch, panel, onPanelChange]
+    [voice, watch, current?.number, media, selectionScope, panel, onPanelChange]
   );
 
   const prepareRecovery = useCallback(
@@ -573,9 +773,19 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
     retrySources();
   }, [sourceScope, retrySources, prepareRecovery]);
 
+  const enableProxyAndRetry = () => {
+    if (enablingProxy) return;
+    setEnablingProxy(true);
+    void saveProxyEnabled(true)
+      .then(retryStream)
+      .catch(error => notify(error.message))
+      .finally(() => setEnablingProxy(false));
+  };
+
   const refreshStream = useCallback(
     (playing: boolean) => {
-      if (navigator.onLine === false || result?.provider !== 'Alloha') return false;
+      if (localPlayback || navigator.onLine === false || result?.provider !== 'Alloha')
+        return false;
       prepareRecovery(playing);
       // A changed resource dependency discards the expired URL, including when
       // this is the only provider. A failed renewal can then show a retry action.
@@ -586,13 +796,19 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       }));
       return true;
     },
-    [prepareRecovery, result, sourceScope]
+    [prepareRecovery, result, sourceScope, localPlayback]
   );
 
   const resumeStream = useCallback(() => refreshStream(true), [refreshStream]);
 
   const streamFailed = useCallback(
     (playing: boolean) => {
+      if (localPlayback) return false;
+      if (selected?.legacyUrl && navigator.onLine !== false) {
+        prepareRecovery(playing);
+        setLegacyStream(selected.url);
+        return true;
+      }
       // An old session is not evidence that its provider is unavailable. Renew
       // it once; a failure of the fresh stream follows the ordinary fallbacks.
       if (
@@ -602,7 +818,14 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       )
         return refreshStream(playing);
       prepareRecovery(playing);
-      if (navigator.onLine === false || !result || manualSource) return false;
+      if (navigator.onLine === false || !result) return false;
+
+      const reserve = selected?.type !== 'mp4' ? kodikMp4(result) : undefined;
+      if (manualSource) {
+        if (manualSource.format !== 'hls' || !reserve) return false;
+        setSourceChoice({ scope: sourceScope, value: `${result.videoId}:mp4` });
+        return true;
+      }
 
       if (kodikReserves.includes(result)) {
         if (kodikReserves.length < 2) return false;
@@ -614,7 +837,6 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
 
         return true;
       }
-      const reserve = selected?.type !== 'mp4' ? kodikMp4(result) : undefined;
       if (
         !reserve &&
         !kodikReserves.length &&
@@ -641,12 +863,13 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       refreshStream,
       result,
       streams.value?.savedAt,
-      selected?.type,
+      selected,
       available,
       candidates,
       kodikReserves,
       manualSource,
       sourceScope,
+      localPlayback,
     ]
   );
 
@@ -708,6 +931,17 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       }
       watch.setStream(playingStream, result?.provider || active.data.player, !!result?.relay);
       watch.update(event);
+      const transfer = voiceTransfer.current;
+      if (
+        transfer?.voice === voiceKey(active.data.dubbing) &&
+        transfer.episode === active.number &&
+        (event.reason === 'loadedmetadata' ||
+          event.reason === 'playing' ||
+          event.reason === 'seeked' ||
+          event.reason === 'timeupdate') &&
+        Math.abs(event.position - Math.min(transfer.position, event.duration || Infinity)) < 1
+      )
+        voiceTransfer.current = undefined;
     },
     [watch, result, active]
   );
@@ -723,12 +957,23 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
     setOverlay('voice');
   }, [onPanelChange]);
 
+  const recoveryVoice =
+    immersive &&
+    !background &&
+    !offline &&
+    all.some(
+      video => video.number === current?.number && voiceKey(video.data.dubbing) !== voiceKey(voice)
+    )
+      ? openVoicePicker
+      : undefined;
+
   const previousEpisode = useCallback(
     () => choose(videos[index - 1].number),
     [choose, videos, index]
   );
 
   const nextEpisode = useCallback(() => choose(videos[index + 1].number), [choose, videos, index]);
+  const tvEpisodeFocus = useRef<TvEpisodeControl>(null);
 
   const switchToSource = useCallback(() => active && selectPlayer(active), [active, selectPlayer]);
 
@@ -754,6 +999,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       <span>Качество</span>
       <Dropdown
         aria-label="Качество видео"
+        data-nav-primary
         value={settings.quality}
         disabled={!qualities.length}
         onChange={changeQuality}
@@ -801,10 +1047,14 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
   const streamInfo = result && selected && (
     <span class="video-stream-meta">
       {result.provider} · {snapshot?.quality || selected.quality}p · {selected.type.toUpperCase()}
-      <span>
-        {' '}
-        · {selected.sourceHost || (!result.relay ? new URL(selected.url).hostname : 'Через сервер')}
-      </span>
+      {selected.offline && ' · Загружено'}
+      {!selected.offline && (
+        <span>
+          {' '}
+          ·{' '}
+          {selected.sourceHost || (!result.relay ? new URL(selected.url).hostname : 'Через сервер')}
+        </span>
+      )}
     </span>
   );
   const syncStatus =
@@ -820,7 +1070,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       <button onClick={retrySync}>Сохранено локально · повторить синхронизацию</button>
     ) : null;
 
-  const checkingAccount = !!session && !session.verified;
+  const checkingAccount = !offline && !!session && !session.verified;
   const loadingEpisodes = resource.loading || (all.length > 0 && !current);
   const hasSurface = !!(
     selected &&
@@ -841,11 +1091,18 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       void setPictureInPictureUnavailable(unavailable).catch(() => {});
   }, [pip?.active, hasSurface, unavailable]);
   const pipButton = pip && !background && <PictureInPictureButton pip={pip} floating />;
+  const stateBack = !background && onBack && (
+    <button type="button" class="native-state-back" onClick={onBack}>
+      <Icon name="back" size={21} />
+      {backLabel || (offline ? 'Загрузки' : 'Об аниме')}
+    </button>
+  );
 
   if (checkingAccount)
     return (
       <>
         <p class="account-loading">Проверяем аккаунт для восстановления просмотра…</p>
+        {stateBack}
         {pipButton}
       </>
     );
@@ -859,6 +1116,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
         ) : (
           <div class="player-skeleton skeleton" role="status" aria-label="Загрузка серий" />
         )}
+        {stateBack}
         {pipButton}
       </>
     );
@@ -866,6 +1124,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
     return (
       <>
         <ErrorState error={resource.error} retry={resource.retry} />
+        {stateBack}
         {pipButton}
       </>
     );
@@ -873,6 +1132,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
     return (
       <>
         <Empty title="Серии пока не появились">Попробуй вернуться позже.</Empty>
+        {stateBack}
         {pipButton}
       </>
     );
@@ -902,9 +1162,9 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
               key={active.video_id}
               fullscreenFrame={fullscreenContainer || fullscreenFrame}
               stream={selected}
-              previewStream={previewStream}
+              previewStream={localPlayback ? undefined : previewStream}
               provider={result?.provider}
-              caption={result?.caption}
+              caption={caption}
               identity={active.video_id}
               start={watch.snapshot().position}
               autoplay={recoveryAutoplay.current ?? (autoplay.current || resumeAutoplay)}
@@ -912,7 +1172,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
               background={background}
               pip={pip}
               title={`${anime.title} — серия ${current.number}`}
-              poster={poster}
+              poster={localPlayback ? '' : poster}
               loadingImage={loadingImage}
               frameKey={frameKey}
               skips={skipMarkers}
@@ -925,17 +1185,20 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
               onResume={result?.provider === 'Alloha' ? resumeStream : undefined}
               onQualityError={restoreQuality}
               onBack={onBack}
+              backLabel={backLabel || (offline ? 'Загрузки' : undefined)}
               onVoice={immersive ? openVoicePicker : undefined}
+              onRecoveryVoice={recoveryVoice}
               voiceLabel={voice.replace(/^Озвучка /, '')}
               onEpisodes={openEpisodes}
               onComments={onComments}
               settings={playerSettings}
-              quality={qualityPicker}
+              quality={localPlayback ? undefined : qualityPicker}
               sourcePicker={sourcePicker}
               streamInfo={streamInfo}
               syncStatus={syncStatus}
               previous={index > 0 ? previousEpisode : undefined}
               next={index < videos.length - 1 ? nextEpisode : undefined}
+              tvEpisodeFocus={tvEpisodeFocus}
             />
           ) : (
             <div class="player-frame native-placeholder">
@@ -967,12 +1230,27 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
                 {sourcePicker}
                 {showStreamError && (
                   <>
-                    <Button onClick={retryStream} variant="primary">
+                    {suggestProxy && (
+                      <Button
+                        onClick={enableProxyAndRetry}
+                        variant="primary"
+                        aria-busy={enablingProxy}
+                        data-nav-primary
+                      >
+                        Включить прокси и повторить
+                      </Button>
+                    )}
+                    <Button
+                      onClick={retryStream}
+                      variant={suggestProxy ? undefined : 'primary'}
+                      data-nav-primary={!suggestProxy || undefined}
+                    >
                       Повторить
                     </Button>
+                    {recoveryVoice && <Button onClick={recoveryVoice}>Сменить озвучку</Button>}
                     {immersive ? (
                       <Button onClick={onBack} variant="text">
-                        Другие источники на странице аниме
+                        {backLabel || (offline ? 'Загрузки' : 'Другие источники на странице аниме')}
                       </Button>
                     ) : (
                       <Button onClick={switchToSource} variant="text">
@@ -985,12 +1263,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
             </div>
           )}
           {!hasSurface && pipButton}
-          {!selected && onBack && (
-            <button class="native-state-back" onClick={onBack}>
-              <Icon name="back" size={21} />
-              Об аниме
-            </button>
-          )}
+          {!hasSurface && stateBack}
         </div>
       </div>
 
@@ -1044,9 +1317,11 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
           label="Найти серию"
           placeholder="Номер серии"
         />
+        <EpisodeDownloadToolbar controls={episodeDownloads} onClick={closeEpisodes} />
         <EpisodeOptions
           anime={anime}
           videos={videos}
+          cacheOnly={!!offline}
           history={
             snapshot && active
               ? {
@@ -1068,6 +1343,8 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
           )}
           episode={current.number}
           query={query}
+          downloads={episodeDownloads?.forEpisode}
+          onOpenSaved={closeEpisodes}
           onSelect={choose}
         />
       </Sidebar>

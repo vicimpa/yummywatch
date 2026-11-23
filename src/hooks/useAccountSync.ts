@@ -1,7 +1,7 @@
 import { useEffect } from 'preact/hooks';
 
 import { initializeAccount } from '~/lib/account';
-import { resetAccountLibrary, syncLibrary } from '~/lib/library';
+import { resetAccountLibrary, runWatchMaintenance, syncLibrary } from '~/lib/library';
 import { notify } from '~/lib/notifications';
 import { SESSION_STORAGE_ERROR, type Session } from '~/lib/session';
 
@@ -13,6 +13,21 @@ export function useAccountSync(session: Session | null) {
 
     return () => window.removeEventListener(SESSION_STORAGE_ERROR, error);
   }, []);
+
+  useEffect(() => {
+    runWatchMaintenance();
+    const refresh = () => {
+      if (document.visibilityState === 'visible') runWatchMaintenance();
+    };
+    const timer = setInterval(refresh, 60 * 60 * 1000);
+    window.addEventListener('online', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('online', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [session?.token, session?.verified]);
 
   useEffect(() => {
     if (!session) {

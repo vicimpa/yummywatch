@@ -17,7 +17,11 @@ export const SettingsCard: FC<TSettingsCardProps> = ({
   children,
   ...props
 }) => (
-  <section {...props} class={['settings-card', className].filter(Boolean).join(' ')}>
+  <section
+    data-tv-focus-group
+    {...props}
+    class={['settings-card', className].filter(Boolean).join(' ')}
+  >
     <div class={['settings-icon', iconClass].filter(Boolean).join(' ')}>{icon}</div>
     <div>
       <h2>{title}</h2>

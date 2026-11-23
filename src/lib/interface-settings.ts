@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useLayoutEffect, useState } from 'preact/hooks';
 
 import { readJSON, writeJSON } from './storage';
 
@@ -12,6 +12,7 @@ export interface InterfaceSettings {
   sounds: boolean;
   animations: boolean;
   style: 'classic' | 'cinema' | 'contrast';
+  episodeLayout: 'cards' | 'list';
 }
 
 const clamp = (value: unknown, fallback: number) =>
@@ -19,6 +20,7 @@ const clamp = (value: unknown, fallback: number) =>
 
 export function interfaceSettings(): InterfaceSettings {
   const raw = readJSON<Partial<InterfaceSettings>>('yumiwatch:interface-settings', {});
+  const tv = typeof document !== 'undefined' && document.documentElement.hasAttribute('data-tv');
 
   return {
     scale: INTERFACE_SCALES.includes(raw.scale as (typeof INTERFACE_SCALES)[number])
@@ -26,14 +28,17 @@ export function interfaceSettings(): InterfaceSettings {
       : 'system',
     volume: clamp(raw.volume, 1),
     effectsVolume: clamp(raw.effectsVolume, 0.35),
-    sounds: raw.sounds !== false,
-    animations: raw.animations !== false,
+    sounds: typeof raw.sounds === 'boolean' ? raw.sounds : !tv,
+    animations: !tv && raw.animations !== false,
     style: ['classic', 'cinema', 'contrast'].includes(raw.style || '') ? raw.style! : 'classic',
+    episodeLayout: raw.episodeLayout === 'list' ? 'list' : 'cards',
   };
 }
 
 export function saveInterfaceSettings(patch: Partial<InterfaceSettings>) {
-  if (!writeJSON('yumiwatch:interface-settings', { ...interfaceSettings(), ...patch }))
+  const key = 'yumiwatch:interface-settings';
+  const saved = readJSON<Partial<InterfaceSettings>>(key, {});
+  if (!writeJSON(key, { ...saved, ...patch }))
     throw new Error('Не удалось сохранить настройки интерфейса.');
   window.dispatchEvent(new Event(INTERFACE_EVENT));
 }
@@ -41,7 +46,7 @@ export function saveInterfaceSettings(patch: Partial<InterfaceSettings>) {
 export function useInterfaceSettings() {
   const [settings, setSettings] = useState(interfaceSettings);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const update = () => setSettings(interfaceSettings());
 
     window.addEventListener(INTERFACE_EVENT, update);

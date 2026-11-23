@@ -47,6 +47,7 @@ export interface WatchEntry {
   duration?: number;
   preview?: string;
   playing?: boolean;
+  completed?: boolean;
 }
 
 export interface Library {

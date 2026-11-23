@@ -12,6 +12,7 @@ import {
   NativePlayback,
   setPictureInPictureUnavailable,
   usesCanvasPlayback,
+  usesAndroidNativePlayback,
   usesMacNativePlayback,
   type PictureInPictureControls,
 } from '~/lib/native-playback';
@@ -22,6 +23,7 @@ import type { MediaUpdate, PlaybackReason } from '~/lib/playback-session';
 import { resetPlayerChrome, setPlayerChrome } from '~/lib/player-chrome';
 import { warmQualitySwitch } from '~/lib/quality-switch';
 import type { Stream, StreamCaption } from '~/lib/streams';
+import type { TvEpisodeControl } from '~/lib/tv-mode';
 
 import { AutoActionCountdown } from './AutoActionCountdown';
 import { NativeStreamMedia } from './NativeStreamMedia';
@@ -61,12 +63,15 @@ export type TVideoSurfaceProps = {
   settings?: ComponentChildren;
   previous?: () => void;
   next?: () => void;
+  tvEpisodeFocus?: RefObject<TvEpisodeControl>;
   quality?: ComponentChildren;
   sourcePicker?: ComponentChildren;
   streamInfo?: ComponentChildren;
   syncStatus?: ComponentChildren;
   onBack?: () => void;
+  backLabel?: string;
   onVoice?: () => void;
+  onRecoveryVoice?: () => void;
   voiceLabel?: string;
   onEpisodes?: () => void;
   onComments?: () => void;
@@ -107,12 +112,15 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
   syncStatus,
   previous,
   next,
+  tvEpisodeFocus,
   fullscreenFrame,
   onQualityError,
   onEpisodes,
   onComments,
   onBack,
+  backLabel,
   onVoice,
+  onRecoveryVoice,
   voiceLabel,
 }) => {
   const frame = useRef<HTMLDivElement>(null);
@@ -132,16 +140,17 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
 
   const [reload, setReload] = useState(0);
   const macNative = import.meta.env.VITE_NATIVE_VIDEO_ONLY === 'true' || usesMacNativePlayback();
-  const native = macNative || usesCanvasPlayback();
+  const nativeSurface = macNative || usesAndroidNativePlayback();
+  const native = nativeSurface || usesCanvasPlayback();
   useLayoutEffect(() => {
-    if (!macNative || background) return;
+    if (!nativeSurface || background) return;
     const root = document.documentElement;
     root.dataset.nativeVideo = 'true';
 
     return () => {
       delete root.dataset.nativeVideo;
     };
-  }, [macNative, background]);
+  }, [nativeSurface, background]);
 
   const webVideos = useMemo(
     () => [createRef<HTMLVideoElement>(), createRef<HTMLVideoElement>()],
@@ -349,6 +358,9 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
       ready = video.readyState >= 2 && readySlots.current.has(active),
       broken = false;
     let lastMediaTime = video.currentTime;
+    let lastAdvancingAt = 0;
+    let naturalPosition: number | undefined;
+    let creditsReached = false;
     let pausedAt = video.paused ? Date.now() : undefined;
     let stallTimer: ReturnType<typeof setTimeout> | undefined;
     let errorTimer: ReturnType<typeof setTimeout> | undefined;
@@ -377,7 +389,7 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
       stallTimer = setTimeout(() => {
         stallTimer = undefined;
         // An offline device says nothing about the availability of a provider.
-        if (navigator.onLine === false) {
+        if (!actualStream.current.offline && navigator.onLine === false) {
           armStall();
 
           return;
@@ -406,7 +418,7 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
     setError('');
     setLoading(!ready);
 
-    const emit = (reason: PlaybackReason, skip?: MediaUpdate['skip']) => {
+    const emit = (reason: PlaybackReason, skip?: MediaUpdate['skip'], completed = false) => {
       if (disposed || activeSlot.current !== active) return;
 
       const time =
@@ -437,12 +449,13 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
           seeking: video.seeking,
           playbackRate: video.playbackRate,
           ...(skip ? { skip } : {}),
+          ...(completed && { completed }),
         },
         actualStream.current
       );
     };
 
-    const finish = () => {
+    const finish = (natural = false) => {
       if (disposed || activeSlot.current !== active || completion.current) return;
       completion.current = true;
       broken = false;
@@ -453,14 +466,14 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
       setCompleted(true);
       setError('');
       video.pause();
-      emit('ended');
+      emit('ended', undefined, natural && !rules.current.skips?.ending);
       video.dispatchEvent(new Event('yumiwatch:complete'));
       callbacks.current.onEnded?.();
     };
 
-    const checkEnd = () => {
+    const checkEnd = (natural = false) => {
       if (mediaAtEnd(video)) {
-        finish();
+        finish(natural);
 
         return true;
       }
@@ -543,7 +556,11 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
         return;
       }
       setNotice(marker.kind === 'opening' ? 'Опенинг пропущен' : 'Титры пропущены');
-      emit('skip', { kind: marker.kind, from, to, automatic });
+      emit(
+        'skip',
+        { kind: marker.kind, from, to, automatic },
+        marker.kind === 'ending' && creditsReached
+      );
       if (marker.kind === 'ending' && mediaAtEnd(video)) finish();
     };
 
@@ -578,9 +595,34 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
         video.currentTime > lastMediaTime + 0.01
       )
         recovered();
+      let crossedCredits = false;
+      let advancing = false;
+      if (event.type === 'seeking' || event.type === 'seeked' || video.seeking) {
+        naturalPosition = undefined;
+        lastAdvancingAt = 0;
+      } else if (event.type === 'timeupdate' && !video.paused && ready && !video.error) {
+        const time = video.currentTime;
+        const elapsed = (performance.now() - lastAdvancingAt) / 1000;
+        const marker = rules.current.skips?.ending;
+        advancing =
+          naturalPosition !== undefined &&
+          time > naturalPosition &&
+          time - naturalPosition <= Math.max(1, elapsed * video.playbackRate + 0.5);
+        crossedCredits = !!(
+          advancing &&
+          marker &&
+          marker.time > 0 &&
+          naturalPosition! < marker.time &&
+          time >= marker.time
+        );
+        naturalPosition = time;
+        lastAdvancingAt = performance.now();
+      }
+      if (crossedCredits) creditsReached = true;
       lastMediaTime = video.currentTime;
       if (!ready) return;
-      if (checkEnd()) return;
+      if (crossedCredits) emit('timeupdate', undefined, true);
+      if (checkEnd(advancing)) return;
       if (video.readyState >= 3 || event.type === 'pause') clearStall();
       if (!video.error && video.readyState >= 2) saved.current.playing = !video.paused;
       emit(event.type as PlaybackReason);
@@ -638,7 +680,12 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
     };
 
     const ended = () => {
-      if (!disposed && activeSlot.current === active) finish();
+      if (!disposed && activeSlot.current === active)
+        finish(
+          !video.seeking &&
+            naturalPosition !== undefined &&
+            Math.abs(video.currentTime - naturalPosition) <= 2
+        );
     };
 
     const buffering = () => {
@@ -664,7 +711,7 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
     };
 
     const offline = () => {
-      if (ready) emit('offline');
+      if (ready && !actualStream.current.offline) emit('offline');
     };
 
     const leaving = () => emit('dispose');
@@ -790,11 +837,17 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
     setReload(value => value + 1);
     retry();
   }, [retry]);
+  const skipLabel =
+    marker && !loading && !error
+      ? marker.kind === 'opening'
+        ? 'Пропустить опенинг'
+        : 'Пропустить титры'
+      : undefined;
 
   return (
     <div
       ref={frame}
-      class={`player-frame universal-frame ${macNative ? 'native-video-frame' : ''} ${controlsVisible ? '' : 'controls-idle'}`}
+      class={`player-frame universal-frame ${nativeSurface ? 'native-video-frame' : ''} ${controlsVisible ? '' : 'controls-idle'}`}
     >
       {layers.map((layer, slot) => {
         if (!layer) return null;
@@ -836,7 +889,9 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
       {!background && (
         <VideoControls
           native={macNative}
+          localMedia={stream.offline}
           onBack={onBack}
+          backLabel={backLabel}
           onVoice={onVoice}
           voiceLabel={voiceLabel}
           onEpisodes={onEpisodes}
@@ -860,6 +915,10 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
           syncStatus={syncStatus}
           previous={previous}
           next={next}
+          tvEpisodeFocus={tvEpisodeFocus}
+          manualSkip={
+            skipLabel && !nextAction && !autoSkip ? { label: skipLabel, run: skipNow } : undefined
+          }
           onVisibility={setControlsVisible}
         />
       )}
@@ -878,12 +937,13 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
           {error && (
             <>
               {sourcePicker}
-              <Button onClick={reloadStream} variant="primary">
+              <Button onClick={reloadStream} variant="primary" data-nav-primary>
                 Повторить загрузку
               </Button>
+              {onRecoveryVoice && <Button onClick={onRecoveryVoice}>Сменить озвучку</Button>}
               {onBack && (
                 <Button onClick={onBack} variant="text">
-                  Вернуться к аниме
+                  {backLabel || 'Вернуться к аниме'}
                 </Button>
               )}
             </>
@@ -908,15 +968,7 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
           onNow={skipNow}
           onComplete={skipAutomatically}
         />
-      ) : (
-        marker &&
-        !loading &&
-        !error && (
-          <button class="button native-skip-overlay" onClick={skipNow}>
-            {marker.kind === 'opening' ? 'Пропустить опенинг' : 'Пропустить титры'}
-          </button>
-        )
-      )}
+      ) : null}
       {notice && !marker && (
         <span class="native-skip-notice" role="status">
           {notice}

@@ -9,7 +9,10 @@ export interface Stream {
   url: string;
   type: 'mp4' | 'hls' | 'dash';
   sourceHost?: string;
-  fallback?: { url: string; type: 'mp4' };
+  legacyUrl?: string;
+  captionUrl?: string;
+  offline?: boolean;
+  fallback?: { url: string; type: 'mp4'; legacyUrl?: string };
 }
 
 export interface StreamCaption {
@@ -106,7 +109,14 @@ export function kodikMp4(result: StreamResult): StreamResult | undefined {
     stream.type === 'mp4'
       ? [stream]
       : stream.fallback
-        ? [{ ...stream, ...stream.fallback, fallback: undefined }]
+        ? [
+            {
+              ...stream,
+              ...stream.fallback,
+              legacyUrl: stream.fallback.legacyUrl,
+              fallback: undefined,
+            },
+          ]
         : []
   );
   if (streams.length) return { ...result, streams };
@@ -126,7 +136,11 @@ function validate(result: StreamResult, relayRoot?: URL): StreamResult {
 
   const streamUrl = (raw: string) => {
     const relayed =
-      result.relay && relayRoot && /^(?:alloha|media)\/[a-f0-9]{32}\/[a-f0-9]{32}$/.test(raw);
+      result.relay &&
+      relayRoot &&
+      /^(?:(?:alloha|media)\/[a-f0-9]{32}\/[a-f0-9]{32}|downloads\/[a-f0-9]{32}\/(?:index\.(?:m3u8|mpd)|video\.mp4|caption\.vtt))$/.test(
+        raw
+      );
     const url = relayed ? new URL(raw, relayRoot) : new URL(raw);
 
     if (
@@ -145,7 +159,11 @@ function validate(result: StreamResult, relayRoot?: URL): StreamResult {
 
       if (stream.type === 'hls' && stream.fallback?.type === 'mp4') {
         try {
-          fallback = { type: 'mp4', url: streamUrl(stream.fallback.url) };
+          fallback = {
+            type: 'mp4',
+            url: streamUrl(stream.fallback.url),
+            ...(stream.fallback.legacyUrl && { legacyUrl: streamUrl(stream.fallback.legacyUrl) }),
+          };
         } catch {
           // A bad optional fallback must not discard a valid primary stream.
         }
@@ -154,7 +172,15 @@ function validate(result: StreamResult, relayRoot?: URL): StreamResult {
       return Number.isFinite(stream.quality) &&
         stream.quality > 0 &&
         ['mp4', 'hls', 'dash'].includes(stream.type)
-        ? [{ ...stream, url: streamUrl(stream.url), fallback }]
+        ? [
+            {
+              ...stream,
+              url: streamUrl(stream.url),
+              ...(stream.legacyUrl && { legacyUrl: streamUrl(stream.legacyUrl) }),
+              ...(stream.captionUrl && { captionUrl: streamUrl(stream.captionUrl) }),
+              fallback,
+            },
+          ]
         : [];
     } catch {
       return [];
@@ -181,7 +207,7 @@ function sourcePriority(url: string) {
   return 3;
 }
 
-const streamCandidates = (videos: Video[]) =>
+export const streamCandidates = (videos: Video[]) =>
   videos.map(video => ({
     url: video.iframe_url.startsWith('//') ? `https:${video.iframe_url}` : video.iframe_url,
     videoId: video.video_id,
@@ -227,7 +253,7 @@ export async function inspectStreamQualities(videos: Video[], signal: AbortSigna
 export async function resolveStream(
   videos: Video[],
   signal: AbortSignal,
-  options: { preferredVideoId?: number; quality?: number } = {}
+  options: { preferredVideoId?: number; quality?: number; animeId?: number } = {}
 ): Promise<StreamResult> {
   const timeout = AbortSignal.timeout(30000);
   const combined = AbortSignal.any([signal, timeout]);
@@ -243,7 +269,11 @@ export async function resolveStream(
   if (isDesktop()) {
     const result = await desktopInvoke<StreamResult>(
       'resolve_candidates',
-      { candidates: sorted, ...(options.quality && { quality: options.quality }) },
+      {
+        candidates: sorted,
+        ...(options.quality && { quality: options.quality }),
+        ...(options.animeId && { animeId: options.animeId }),
+      },
       combined
     );
 

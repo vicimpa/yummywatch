@@ -79,6 +79,86 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe('our player mode', () => {
+  it('keeps the live position and pause state when changing voices', async () => {
+    const a = video('1', 'AniLibria', 101);
+    const b = video('1', 'AniDub', 102);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async () => new Response(JSON.stringify({ response: [a, b] })))
+    );
+    vi.mocked(resolveStream).mockImplementation(async ([selected]) => ({
+      provider: 'Test',
+      videoId: selected.video_id,
+      duration: 1200,
+      streams: [{ quality: 720, type: 'mp4', url: `https://cdn.example/${selected.video_id}.mp4` }],
+    }));
+    const { container } = render(<Player anime={anime} />);
+    const first = await waitFor(() => {
+      const media = container.querySelector<HTMLVideoElement>(`video[src*="${a.video_id}.mp4"]`);
+      expect(media).toBeTruthy();
+      return media!;
+    });
+    fireEvent.loadedMetadata(first);
+    first.currentTime = 503;
+    fireEvent.timeUpdate(first);
+    vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+    fireEvent.click(screen.getByRole('button', { name: /Озвучка.*AniLibria/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /AniDub/ }));
+    const next = await waitFor(() => {
+      const media = container.querySelector<HTMLVideoElement>(`video[src*="${b.video_id}.mp4"]`);
+      expect(media).toBeTruthy();
+      return media!;
+    });
+    fireEvent.loadedMetadata(next);
+    expect(next.currentTime).toBe(503);
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+  });
+
+  it('changes voices from a failed stream and resumes playback at the saved position', async () => {
+    const original = video('1', 'Reanimedia', 101);
+    const alternate = video('1', 'Первый канал', 102);
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementation(
+          async () => new Response(JSON.stringify({ response: [original, alternate] }))
+        )
+    );
+    vi.mocked(resolveStream).mockImplementation(async ([video]) => ({
+      provider: 'Test',
+      videoId: video.video_id,
+      duration: 7149,
+      streams: [{ quality: 480, type: 'mp4', url: `https://cdn.example/${video.video_id}.mp4` }],
+    }));
+    const { container } = render(<Player anime={anime} presentation="immersive" startPlaying />);
+    const playingVideo = (id: number) =>
+      container.querySelector<HTMLVideoElement>(`video[src$="${id}.mp4"]`);
+    const first = await waitFor(() => {
+      expect(playingVideo(original.video_id)).toBeTruthy();
+      return playingVideo(original.video_id)!;
+    });
+    Object.defineProperty(first, 'duration', { value: 7149 });
+    Object.defineProperty(first, 'paused', { value: false });
+    fireEvent.loadedMetadata(first);
+    first.currentTime = 131;
+    fireEvent.timeUpdate(first);
+    mediaError(first);
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Сменить озвучку' }, { timeout: 3000 })
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /Первый канал/ }));
+    const next = await waitFor(() => {
+      expect(playingVideo(alternate.video_id)).toBeTruthy();
+      return playingVideo(alternate.video_id)!;
+    });
+    vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+    fireEvent.loadedMetadata(next);
+    expect(next.currentTime).toBe(131);
+    expect(HTMLMediaElement.prototype.play).toHaveBeenCalled();
+  });
+
   it('renews a single Alloha source after a long pause and restores position, sound and speed', async () => {
     const source = video('1');
     vi.stubGlobal(
@@ -410,6 +490,68 @@ describe('our player mode', () => {
     expect(
       vi.mocked(resolveStream).mock.calls.map(([videos]) => videos.map(item => item.video_id))
     ).toEqual([[kodik.video_id, reserve.video_id], [reserve.video_id]]);
+  });
+
+  it('keeps the same Kodik source when switching a failed manual HLS stream to MP4', async () => {
+    savePlaybackSettings({ quality: '480' });
+    const cvh = video('1');
+    const kodik = {
+      ...video('1', 'AniLibria', 4),
+      iframe_url: 'https://kodikplayer.com/video/1',
+    };
+    vi.stubGlobal('isTauri', true);
+    vi.stubGlobal('__TAURI_INTERNALS__', {
+      invoke: vi.fn(async (command, args) => {
+        if (command === 'inspect_stream_qualities') return [480];
+        if (command !== 'yummy_request') return null;
+        const response = args.request.path.includes('/videos') ? [cvh, kodik] : anime;
+        return { status: 200, body: JSON.stringify({ response }) };
+      }),
+    });
+    vi.mocked(resolveStream).mockImplementation(async sources =>
+      sources.length > 1
+        ? {
+            provider: 'CVH',
+            videoId: cvh.video_id,
+            duration: 1400,
+            streams: [{ quality: 480, type: 'mp4', url: 'https://cdn.example/cvh.mp4' }],
+          }
+        : {
+            provider: 'Kodik',
+            videoId: kodik.video_id,
+            duration: 1400,
+            streams: [
+              {
+                quality: 480,
+                type: 'hls',
+                url: 'https://cdn.example/kodik.m3u8',
+                fallback: { type: 'mp4', url: 'https://cdn.example/kodik.mp4' },
+              },
+            ],
+          }
+    );
+    const { container } = render(<Player anime={anime} />);
+    const findVideo = (name: string) =>
+      waitFor(() => {
+        const media = container.querySelector<HTMLVideoElement>(`video[src$="${name}.mp4"]`);
+        expect(media).toBeTruthy();
+        return media!;
+      });
+    const media = await findVideo('cvh');
+    Object.defineProperty(media, 'duration', { value: 1400, configurable: true });
+    fireEvent.loadedMetadata(media);
+    media.currentTime = 321;
+    fireEvent.timeUpdate(media);
+    fireEvent.click(screen.getByRole('button', { name: 'Настройки плеера' }));
+    const ready = vi.spyOn(HTMLMediaElement.prototype, 'readyState', 'get').mockReturnValue(0);
+    chooseOption(screen.getByRole('combobox', { name: 'Источник потока' }), 'Kodik · HLS');
+
+    const reserve = await findVideo('kodik');
+    ready.mockReturnValue(4);
+    Object.defineProperty(reserve, 'duration', { value: 1400, configurable: true });
+    fireEvent.loadedMetadata(reserve);
+    expect(reserve.currentTime).toBe(321);
+    expect(vi.mocked(resolveStream).mock.lastCall?.[0]).toEqual([kodik]);
   });
 
   it('lists qualities across sources and falls back within the manually selected stream', async () => {
@@ -964,6 +1106,45 @@ describe('our player mode', () => {
     await screen.findByText('Нет доступного потока', {}, { timeout: 3000 });
     expect(container.querySelector('iframe')).toBeNull();
     expect(screen.getByRole('button', { name: 'Повторить' })).toBeTruthy();
+  });
+  it('suggests enabling a disabled proxy on a Kodik server error and retries after saving', async () => {
+    let enabled = false;
+    const source = { ...video('1'), iframe_url: 'https://kodikplayer.com/video/1' };
+    const invoke = vi.fn(async (command, args) => {
+      if (command === 'proxy_settings') {
+        if (typeof args.enabled === 'boolean') enabled = args.enabled;
+        return enabled;
+      }
+      if (command !== 'yummy_request') return [];
+      const response = args.request.path.includes('/videos') ? [source] : anime;
+      return { status: 200, body: JSON.stringify({ response }) };
+    });
+    vi.stubGlobal('isTauri', true);
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+    vi.mocked(resolveStream).mockImplementation(async () => {
+      if (!enabled) {
+        throw new Error(
+          'Kodik · страница плеера. Источник вернул HTTP 500. Aksor · нет манифеста DASH (HTTP 203).'
+        );
+      }
+      return {
+        provider: 'Kodik',
+        videoId: source.video_id,
+        duration: 1400,
+        streams: [{ quality: 360, type: 'mp4', url: 'https://cdn.example/recovered.mp4' }],
+      };
+    });
+    const { container } = render(<Player anime={anime} />);
+
+    const enable = await screen.findByRole(
+      'button',
+      { name: 'Включить прокси и повторить' },
+      { timeout: 3000 }
+    );
+    expect(enabled).toBe(false);
+    fireEvent.click(enable);
+    await waitFor(() => expect(container.querySelector('video')?.src).toContain('recovered.mp4'));
+    expect(invoke).toHaveBeenCalledWith('proxy_settings', { enabled: true }, undefined);
   });
   it('waits for the remaining source and a grace period before showing its final error', async () => {
     const sources = [video('1'), video('1', 'AniLibria', 4)];

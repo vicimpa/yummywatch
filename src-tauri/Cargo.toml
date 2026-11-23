@@ -19,21 +19,29 @@ tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync", "time", "macros", "net", "io-util"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "net", "io-util", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip", "socks"] }
 regex = "1"
 url = "2"
 rand = "0.9"
 base64 = "0.22"
+quick-xml = "0.42"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18"
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+sha2 = "0.10"
+time = { version = "0.3", features = ["parsing"] }
 
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "android"))'.dependencies]
 futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
@@ -44,7 +52,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAppl
 
 [target.'cfg(target_os = "windows")'.dependencies]
 libloading = "0.7"
-windows-sys = { version = "0.61", features = ["Win32_System_Power"] }
+same-file = "1"
+windows-sys = { version = "0.61", features = ["Win32_System_Power", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
@@ -52,6 +61,7 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAppli
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
+libloading = "0.7"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

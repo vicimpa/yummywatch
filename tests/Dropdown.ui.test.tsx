@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/preact';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/preact';
 import { afterEach, expect, it, vi } from 'vitest';
 import { PlaybackSettingsCard } from '~/components/PlaybackSettings';
 import { playbackSettings } from '~/lib/playback-settings';
@@ -53,6 +53,8 @@ it('supports keyboard selection, cancel, Tab and outside clicks', () => {
   const trigger = screen.getByRole('combobox', { name: 'Предпочитаемое качество' });
   trigger.focus();
   fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+  expect(screen.queryByRole('listbox')).toBeNull();
+  fireEvent.keyDown(trigger, { key: 'Enter' });
   fireEvent.keyDown(trigger, { key: 'End' });
   fireEvent.keyDown(trigger, { key: 'Enter' });
   expect(playbackSettings().quality).toBe('auto');
@@ -66,6 +68,33 @@ it('supports keyboard selection, cancel, Tab and outside clicks', () => {
   expect(screen.queryByRole('listbox')).toBeNull();
   fireEvent.click(trigger);
   fireEvent.pointerDown(document.body);
+  expect(screen.queryByRole('listbox')).toBeNull();
+});
+
+it('closes a focused dropdown on a second mouse click', () => {
+  render(
+    <>
+      <PlaybackSettingsCard />
+      <button type="button">Дальше</button>
+    </>
+  );
+  const trigger = screen.getByRole('combobox', { name: 'Предпочитаемое качество' });
+  const label = trigger.querySelector('span')!;
+  fireEvent.click(label);
+  expect(screen.getByRole('listbox')).toBeTruthy();
+  expect(document.activeElement).toBe(trigger);
+
+  fireEvent.pointerDown(label, { button: 0 });
+  // Mirror browsers that normally blur a focused button on mousedown.
+  if (fireEvent.mouseDown(label, { button: 0 })) act(() => trigger.blur());
+  fireEvent.mouseUp(label, { button: 0 });
+  fireEvent.click(label);
+
+  expect(screen.queryByRole('listbox')).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+  fireEvent.click(label);
+  expect(screen.getByRole('listbox')).toBeTruthy();
+  act(() => screen.getByRole('button', { name: 'Дальше' }).focus());
   expect(screen.queryByRole('listbox')).toBeNull();
 });
 
@@ -87,6 +116,7 @@ it('keeps the list inside its modal and skips disabled options', () => {
     </Sheet>
   );
   const trigger = screen.getByRole('combobox', { name: 'Качество' });
+  fireEvent.keyDown(trigger, { key: 'Enter' });
   fireEvent.keyDown(trigger, { key: 'Home' });
   const list = screen.getByRole('listbox', { name: 'Качество' });
   expect(list.parentElement).toBe(screen.getByRole('dialog'));

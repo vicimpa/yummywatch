@@ -5,6 +5,7 @@ import { focusTarget } from '~/lib/keyboard-navigation';
 
 const OVERSCAN = 3,
   SMALL_LIST = 60;
+const secondaryAction = '[data-virtual-secondary]:not(:disabled)';
 
 export type TVirtualGridProps<T> = {
   items: readonly T[];
@@ -24,7 +25,7 @@ export const VirtualGrid: TVirtualGrid = ({
   layout = 'grid',
 }) => {
   const root = useRef<HTMLDivElement>(null),
-    pendingFocus = useRef<number | null>(null);
+    pendingFocus = useRef<{ index: number; secondary: boolean } | null>(null);
   const [focus, setFocus] = useState<number | null>(null);
   const [window, setWindow] = useState({
     columns: 1,
@@ -116,15 +117,18 @@ export const VirtualGrid: TVirtualGrid = ({
   }, [active, layout, items.length]);
 
   useLayoutEffect(() => {
-    if (pendingFocus.current === null) return;
+    const pending = pendingFocus.current;
+    if (!pending) return;
 
-    const node = root.current?.querySelector<HTMLElement>(
-      `[data-virtual-index="${pendingFocus.current}"] [data-gallery-link],[data-virtual-index="${pendingFocus.current}"] a:not([tabindex="-1"])`
-    );
+    const item = root.current?.querySelector(`[data-virtual-index="${pending.index}"]`);
+    const node =
+      (pending.secondary && item?.querySelector<HTMLElement>(secondaryAction)) ||
+      item?.querySelector<HTMLElement>('[data-gallery-link],a:not([tabindex="-1"])');
 
     if (node) {
       pendingFocus.current = null;
-      focusTarget(node);
+      // The intermediate rows do not exist while jumping the render window.
+      focusTarget(node, virtual);
     }
   });
 
@@ -138,34 +142,52 @@ export const VirtualGrid: TVirtualGrid = ({
     )
       return;
 
-    const target = event.target as HTMLElement,
-      index = Number(target.closest<HTMLElement>('[data-virtual-index]')?.dataset.virtualIndex);
+    const target = event.target as HTMLElement;
+    const item = target.closest<HTMLElement>('[data-virtual-index]');
+    const index = Number(item?.dataset.virtualIndex);
 
     if (!Number.isInteger(index) || target.closest('input,select,textarea')) return;
 
     const { columns } = latest.current.window,
       count = latest.current.items.length;
     let next = index;
+    const secondary = target.matches(secondaryAction);
+    let focusSecondary = secondary;
+    if (event.key === 'ArrowDown' && !secondary) {
+      const action = item?.querySelector<HTMLElement>(secondaryAction);
+      if (action) {
+        event.preventDefault();
+        focusTarget(action);
+        return;
+      }
+    }
+    if (secondary && event.key === 'ArrowUp') {
+      const poster = item?.querySelector<HTMLElement>('[data-gallery-link]');
+      if (poster) {
+        event.preventDefault();
+        focusTarget(poster);
+        return;
+      }
+    }
 
     if (event.key === 'ArrowRight') {
       event.preventDefault();
       if (index % columns === columns - 1 || index + 1 >= count) return;
       next++;
     } else if (event.key === 'ArrowLeft') {
+      if (index % columns === 0) return;
       event.preventDefault();
-      if (index % columns === 0) {
-        globalThis.window.dispatchEvent(new Event('yumiwatch:menu'));
-
-        return;
-      }
       next--;
     } else if (event.key === 'ArrowDown') {
+      if (Math.floor(index / columns) === Math.floor((count - 1) / columns)) return;
       event.preventDefault();
       next = Math.min(count - 1, index + columns);
+      focusSecondary = false;
     } else if (event.key === 'ArrowUp') {
       if (index < columns) return;
       event.preventDefault();
       next -= columns;
+      focusSecondary = true;
     } else if (event.key === 'Home') {
       event.preventDefault();
       next = 0;
@@ -174,7 +196,7 @@ export const VirtualGrid: TVirtualGrid = ({
       next = count - 1;
     } else return;
     if (next === index) return;
-    pendingFocus.current = next;
+    pendingFocus.current = { index: next, secondary: focusSecondary };
     setFocus(next);
 
     const row = Math.floor(next / columns);

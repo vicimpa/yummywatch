@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/preact';
 import { Gallery } from '~/components/Gallery';
+import { InterfaceEffects } from '~/components/InterfaceEffects';
 import { navigateGallery } from '~/lib/gallery-navigation';
 import { clearSession } from '~/lib/session';
 import { anime } from './fixtures';
@@ -48,7 +49,8 @@ describe('catalog gallery', () => {
   });
   it('does not mistake a wrapped neighboring title for the row above', () => {
     render(
-      <section onKeyDown={navigateGallery}>
+      <main id="main">
+        <InterfaceEffects onBack={() => {}} />
         <div data-gallery-row>
           {['Коротко', 'Длинное название в две строки'].map(name => (
             <article data-gallery-item key={name}>
@@ -58,27 +60,19 @@ describe('catalog gallery', () => {
             </article>
           ))}
         </div>
-      </section>
+      </main>
     );
 
     const links = screen.getAllByRole('link');
 
     links.forEach((link, index) => {
       vi.spyOn(link, 'getClientRects').mockReturnValue({ length: 1 } as DOMRectList);
-      vi.spyOn(link, 'getBoundingClientRect').mockReturnValue({
-        x: index * 200,
-        y: 250,
-        top: 250,
-        width: 180,
-        height: index ? 60 : 20,
-      } as DOMRect);
-      vi.spyOn(link.closest('article')!, 'getBoundingClientRect').mockReturnValue({
-        x: index * 200,
-        y: 0,
-        top: 0,
-        width: 180,
-        height: 320,
-      } as DOMRect);
+      vi.spyOn(link.closest('article')!, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(index * 200, 0, 180, 330)
+      );
+      vi.spyOn(link, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(index * 200, 300 - index * 25, 180, 30 + index * 25)
+      );
     });
     links[1].focus();
     fireEvent.keyDown(links[1], { key: 'ArrowUp' });
@@ -86,8 +80,14 @@ describe('catalog gallery', () => {
   });
   it('shows a random feature, keeps it stable on hover and switches to another title on request', async () => {
     vi.spyOn(Math, 'random').mockReturnValue(0);
+    recordWatch(anime, video('1'), 'group', 123);
     const { container } = render(<Gallery />);
+    const resume = screen.getByRole('region', { name: 'Продолжить просмотр' });
+    const resumeLink = within(resume).getByRole('link', { name: new RegExp(anime.title) });
+    resumeLink.focus();
     const feature = await screen.findByRole('region', { name: 'Выбранное аниме' });
+    expect(resume.compareDocumentPosition(feature) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(document.activeElement).toBe(resumeLink);
     const title = within(feature).getByRole('heading');
     expect(title.textContent).toBe(anime.title);
     const rail = await screen.findByRole('region', { name: 'Лучшие аниме' });
@@ -103,29 +103,31 @@ describe('catalog gallery', () => {
     expect(title.textContent).toBe('Второе аниме');
     expect(container.querySelector('iframe,video')).toBeNull();
   });
-  it('moves by poster position and leaves ordinary actions to the browser', () => {
+  it('moves by poster position and keeps Home and End within the row', () => {
     render(
-      <section onKeyDown={navigateGallery}>
-        <div data-gallery-row>
-          {['A', 'B', 'C', 'D'].map(name => (
-            <a key={name} data-gallery-link href={`#${name}`}>
-              {name}
-            </a>
-          ))}
-        </div>
-      </section>
+      <>
+        <InterfaceEffects onBack={() => {}} />
+        <main id="main">
+          <section onKeyDown={navigateGallery}>
+            <div data-gallery-row>
+              {['A', 'B', 'C', 'D'].map(name => (
+                <a key={name} data-gallery-link href={`#${name}`}>
+                  {name}
+                </a>
+              ))}
+            </div>
+          </section>
+        </main>
+      </>
     );
 
     const links = screen.getAllByRole('link');
 
     links.forEach((link, index) => {
       vi.spyOn(link, 'getClientRects').mockReturnValue({ length: 1 } as DOMRectList);
-      vi.spyOn(link, 'getBoundingClientRect').mockReturnValue({
-        x: (index % 2) * 200,
-        y: Math.floor(index / 2) * 300,
-        width: 180,
-        height: 30,
-      } as DOMRect);
+      vi.spyOn(link, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect((index % 2) * 200, Math.floor(index / 2) * 300, 180, 30)
+      );
     });
     links[0].focus();
     fireEvent.keyDown(links[0], { key: 'ArrowRight' });
@@ -138,6 +140,5 @@ describe('catalog gallery', () => {
     expect(document.activeElement).toBe(links[0]);
     fireEvent.keyDown(links[0], { key: 'End' });
     expect(document.activeElement).toBe(links[3]);
-    expect(fireEvent.keyDown(links[3], { key: 'Enter' })).toBe(true);
   });
 });

@@ -62,7 +62,8 @@ export function NativeStreamMedia(props: Props) {
 
     const startupTimeout = stream.fallback ? STREAM_STARTUP_TIMEOUT_MS : STREAM_LOAD_TIMEOUT_MS;
     const checkStartup = () => {
-      if (navigator.onLine === false) timer = setTimeout(checkStartup, startupTimeout);
+      if (!stream.offline && navigator.onLine === false)
+        timer = setTimeout(checkStartup, startupTimeout);
       else fail('Источник не подготовил видео вовремя.');
     };
     let timer = setTimeout(checkStartup, startupTimeout);

@@ -6,6 +6,7 @@ import { cardContext } from '~/lib/card-context';
 import { useLibrary, useSession } from '~/lib/hooks';
 import { removeContinue, setAnimeList, toggleFavorite } from '~/lib/library';
 import { WATCH_LISTS } from '~/lib/lists';
+import { canStartAnime } from '~/lib/player';
 import { notify } from '~/lib/notifications';
 import { downloadPoster, posterUrl } from '~/lib/poster-download';
 import { getSession } from '~/lib/session';
@@ -17,7 +18,13 @@ export function CardContextMenu() {
   const library = useLibrary();
   const session = useSession();
   const menu = useRef<HTMLDivElement>(null);
+  const listTrigger = useRef<HTMLButtonElement>(null);
+  const returningFromLists = useRef(false);
   const [lists, setLists] = useState(false);
+  const returnToMenu = () => {
+    returningFromLists.current = true;
+    setLists(false);
+  };
   const close = (restore = false) => {
     const source = cardContext.value?.source;
     cardContext.value = null;
@@ -61,9 +68,17 @@ export function CardContextMenu() {
     const rect = element.getBoundingClientRect();
     element.style.left = `${Math.max(8, Math.min(request.x, innerWidth - rect.width - 8))}px`;
     element.style.top = `${Math.max(8, Math.min(request.y, innerHeight - rect.height - 8))}px`;
-    element
-      .querySelector<HTMLElement>('[role=menuitem]:not(:disabled)')
-      ?.focus({ preventScroll: true });
+    const target = returningFromLists.current
+      ? listTrigger.current
+      : element.querySelector<HTMLElement>('[role=menuitem]:not(:disabled)');
+    returningFromLists.current = false;
+    target?.focus({ preventScroll: true });
+    const dismiss = () => {
+      if (lists) returnToMenu();
+      else close(true);
+    };
+    element.addEventListener('yumiwatch:tv-dismiss', dismiss);
+    return () => element.removeEventListener('yumiwatch:tv-dismiss', dismiss);
   }, [request, lists]);
   useEffect(() => {
     setLists(false);
@@ -78,10 +93,11 @@ export function CardContextMenu() {
     };
     const dismiss = () => close();
     const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        close(true);
+        if (lists) returnToMenu();
+        else close(true);
       }
     };
     document.addEventListener('pointerdown', outside);
@@ -96,7 +112,7 @@ export function CardContextMenu() {
       window.removeEventListener('resize', dismiss);
       window.removeEventListener('hashchange', dismiss);
     };
-  }, [request]);
+  }, [request, lists]);
   if (!request) return null;
   const { anime } = request;
   const favorite = library.favorites.some(value => value.anime_id === anime.anime_id);
@@ -166,14 +182,14 @@ export function CardContextMenu() {
           close(true);
         } else if (event.key === 'ArrowLeft' && lists) {
           event.preventDefault();
-          setLists(false);
+          returnToMenu();
         }
       }}
     >
       <div class="card-context-title">{anime.title}</div>
       {lists ? (
         <>
-          <button type="button" role="menuitem" onClick={() => setLists(false)}>
+          <button type="button" role="menuitem" onClick={returnToMenu}>
             <Icon name="back" size={17} />
             Назад
           </button>
@@ -210,15 +226,17 @@ export function CardContextMenu() {
             <Icon name="grid" size={17} />
             Открыть тайтл
           </AppLink>
-          <AppLink
-            role="menuitem"
-            href={`#/anime/${anime.anime_id}?view=watch&play=1`}
-            publicHref={animeSiteUrl(anime)}
-            onClick={() => close()}
-          >
-            <Icon name="play" size={17} />
-            {continuing ? 'Продолжить просмотр' : 'Начать просмотр'}
-          </AppLink>
+          {(continuing || canStartAnime(anime)) && (
+            <AppLink
+              role="menuitem"
+              href={`#/anime/${anime.anime_id}?view=watch&play=1${continuing ? '' : '&start=1'}`}
+              publicHref={animeSiteUrl(anime)}
+              onClick={() => close()}
+            >
+              <Icon name="play" size={17} />
+              {continuing ? 'Продолжить просмотр' : 'Начать просмотр'}
+            </AppLink>
+          )}
           {anime.anime_url && (
             <AppLink
               role="menuitem"
@@ -242,6 +260,7 @@ export function CardContextMenu() {
             library.loading
           )}
           <button
+            ref={listTrigger}
             type="button"
             role="menuitem"
             aria-haspopup="menu"

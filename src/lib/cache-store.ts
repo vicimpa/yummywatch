@@ -234,6 +234,54 @@ export function initializeCache(): Promise<void> {
   return opening;
 }
 
+const isPreservedData = (entry: Pick<CacheEntry, 'kind' | 'key'>) =>
+  entry.kind === 'data' && /:chat:v1:thread:/.test(entry.key);
+
+export const clearedAt = { data: 0, image: 0, frame: 0 };
+
+export async function appCacheSizes() {
+  await initializeCache();
+  const sizes = { data: 0, image: 0, frame: 0 };
+  for (const entry of entries.values())
+    if (!isPreservedData(entry)) sizes[entry.kind] += entry.bytes;
+  return sizes;
+}
+
+export async function clearAppCache(kind: CacheEntry['kind']) {
+  await initializeCache();
+  resetRequests();
+  clearedAt[kind] = Date.now();
+  if (db) {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db!.transaction('entries', 'readwrite');
+      const request = transaction.objectStore('entries').openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        if (cursor.value.kind === kind && !isPreservedData(cursor.value)) cursor.delete();
+        cursor.continue();
+      };
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(new Error('Не удалось очистить кэш.'));
+    });
+  }
+  for (const [key, entry] of entries) {
+    if (entry.kind !== kind || isPreservedData(entry)) continue;
+    entries.delete(key);
+    dirty.delete(key);
+  }
+  if (kind === 'data') {
+    for (const key of ['yumiwatch:api:v1', 'yumiwatch:api:private:v1']) {
+      const saved = readJSON<Record<string, unknown>>(key, {});
+      const preserve = Object.fromEntries(
+        Object.entries(saved).filter(([key]) => isPreservedData({ kind, key }))
+      );
+      if (Object.keys(preserve).length) writeJSON(key, preserve);
+      else localStorage.removeItem(key);
+    }
+  }
+}
+
 export function resetMemoryCache() {
   resetRequests();
   entries.clear();

@@ -13,6 +13,7 @@ type Props = {
   'aria-describedby'?: string;
   'aria-invalid'?: JSX.AriaAttributes['aria-invalid'];
   'aria-required'?: JSX.AriaAttributes['aria-required'];
+  'data-nav-primary'?: boolean;
   id?: string;
   disabled?: boolean;
 };
@@ -89,6 +90,12 @@ export const Dropdown: FC<Props> = ({ value, options, onChange, disabled, ...pro
 
   const keydown = (event: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => {
     if (disabled || !enabled.length || event.isComposing) return;
+    if (!open && event.key !== 'Enter' && event.key !== ' ') return;
+    if (open && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (event.key === 'Tab') {
       setExpanded(false);
       return;
@@ -114,9 +121,8 @@ export const Dropdown: FC<Props> = ({ value, options, onChange, disabled, ...pro
       else if (event.key === 'End') setHighlighted(enabled.at(-1)!);
       else {
         const offset = event.key === 'ArrowDown' ? 1 : -1;
-        setHighlighted(
-          enabled[(enabled.indexOf(active) + offset + enabled.length) % enabled.length]
-        );
+        const index = enabled.indexOf(active) + offset;
+        setHighlighted(enabled[Math.max(0, Math.min(index, enabled.length - 1))]);
       }
     } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
       const match = enabled.find(index =>
@@ -146,6 +152,10 @@ export const Dropdown: FC<Props> = ({ value, options, onChange, disabled, ...pro
         aria-controls={open ? id : undefined}
         aria-activedescendant={open ? `${id}-${active}` : undefined}
         ref={trigger}
+        onMouseDown={event => {
+          // Keep focus on the open trigger until click toggles the list.
+          if (open && event.button === 0) event.preventDefault();
+        }}
         onClick={() => {
           trigger.current?.focus({ preventScroll: true });
           setHighlighted(initial);

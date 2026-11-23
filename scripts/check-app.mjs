@@ -88,6 +88,7 @@ try {
       page.on('pageerror', error => errors.push(error.message));
       await page.exposeFunction('desktopTestInvoke', async (command, args) => {
         if (command === 'load_account_session') return null;
+        if (command === 'list_downloads') return [];
         if (command === 'set_window_controls_visible') {
           nativeButtonsVisible = args.visible;
 
@@ -305,10 +306,19 @@ try {
           { timeout: 20000 }
         );
       };
+      const aboutEpisodes = page.locator('.about-inline-episodes');
+      const aboutVoice = name =>
+        aboutEpisodes
+          .getByRole('group', { name: 'Озвучка серий' })
+          .getByRole('button', { name, exact: true });
+      const playFirstEpisode = async name => {
+        await aboutVoice(name).click();
+        await aboutEpisodes.getByRole('link', { name: 'Серия 1', exact: true }).click();
+      };
 
       if (process.env.APP_CACHE_ONLY === '1') {
         await page.goto('https://app-probe.test/#/anime/1486');
-        await page.locator('.voice-tile').filter({ hasText: '2x2' }).waitFor();
+        await aboutVoice('2x2').waitFor();
         await page.waitForFunction(() => {
           const image = document.querySelector('.watch-poster img');
 
@@ -353,7 +363,7 @@ try {
         await page.route('https://static.yani.tv/**', route => route.abort());
         await page.route('https://i.kodikres.com/**', route => route.abort());
         await page.reload({ waitUntil: 'domcontentloaded' });
-        await page.locator('.voice-tile').filter({ hasText: '2x2' }).waitFor();
+        await aboutVoice('2x2').waitFor();
         await page.waitForFunction(() => {
           const image = document.querySelector('.watch-poster img');
 
@@ -474,7 +484,7 @@ try {
       await nav('Поиск');
       await page.locator('.search-results a[data-app-href^="#/anime/1486"]').first().click();
       await transition();
-      await page.locator('.voice-tile').filter({ hasText: '2x2' }).waitFor();
+      await aboutVoice('2x2').waitFor();
       await check('film about');
       await capture('film-about');
       assert.equal(
@@ -491,7 +501,7 @@ try {
       }
       await page.getByRole('button', { name: /Добавить «.*» в избранное/ }).click();
       await page.getByRole('button', { name: /Убрать «.*» из избранного/ }).waitFor();
-      await page.locator('.voice-tile').filter({ hasText: '2x2' }).click();
+      await playFirstEpisode('2x2');
       await transition();
       await decoded();
       await check('film 2x2 playback');
@@ -664,7 +674,7 @@ try {
         location.hash = '/anime/610';
       });
       await transition();
-      await page.locator('.voice-tile').filter({ hasText: 'Дубляж AniLibria' }).click();
+      await playFirstEpisode('Дубляж AniLibria');
       await transition();
       await decoded();
       await check('Code Geass AniLibria dub');
@@ -725,7 +735,7 @@ try {
           !(await page.locator('.full-synopsis').innerText()).includes('CACHE_REFRESH_VERIFIED'),
           'Warm data was not shown first'
         );
-        await page.waitForFunction(() => !!document.querySelector('.voice-tile'));
+        await aboutVoice('2x2').waitFor();
 
         const deadline = Date.now() + 15000;
 
@@ -751,7 +761,7 @@ try {
         await page.waitForFunction(() =>
           document.querySelector('.full-synopsis')?.textContent.includes('CACHE_REFRESH_VERIFIED')
         );
-        await page.locator('.voice-tile').filter({ hasText: '2x2' }).waitFor();
+        await aboutVoice('2x2').waitFor();
         await page.waitForFunction(() => {
           const image = document.querySelector('.watch-poster img');
 

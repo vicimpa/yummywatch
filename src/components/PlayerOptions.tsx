@@ -2,11 +2,14 @@ import type { FunctionalComponent as FC } from 'preact';
 import { useMemo } from 'preact/hooks';
 
 import { imageUrl } from '~/lib/api';
+import { useSession } from '~/lib/hooks';
 import { formatTime, groupVideos, videoPosition } from '~/lib/player';
 import { groupVoices, voiceKey } from '~/lib/streams';
 import type { Anime, Video, WatchEntry } from '~/lib/types';
+import { watchFrameKey } from '~/lib/watch-frames';
 
 import { EpisodeCaption, EpisodePreview, OptionButton } from '~/ui';
+import { EpisodeWithDownload, type EpisodeDownloads } from './EpisodeDownload';
 
 type TVoiceOptionsProps = {
   videos: Video[];
@@ -118,6 +121,9 @@ type TEpisodeOptionsProps = {
   query: string;
   history?: WatchEntry;
   checkpoints?: WatchEntry[];
+  cacheOnly?: boolean;
+  downloads?: EpisodeDownloads;
+  onOpenSaved?: () => void;
   onSelect: (episode: string) => void;
 };
 
@@ -128,8 +134,13 @@ export const EpisodeOptions: FC<TEpisodeOptionsProps> = ({
   query,
   history,
   checkpoints = [],
+  cacheOnly,
+  downloads,
+  onOpenSaved,
   onSelect,
 }) => {
+  const accountId = useSession()?.user.id;
+  const poster = imageUrl(anime.poster?.medium || anime.poster?.big);
   const frames = useMemo(
     () =>
       new Map(anime.random_screenshots?.map(frame => [frame.episode, frame] as const).reverse()),
@@ -142,14 +153,14 @@ export const EpisodeOptions: FC<TEpisodeOptionsProps> = ({
         .map(video => {
           const frame = frames.get(video.number);
 
-          return { video, frame, preview: imageUrl(frame?.sizes.small || anime.poster?.medium) };
+          return { video, preview: imageUrl(frame?.sizes.small) || poster };
         }),
-    [videos, query, frames, anime.poster?.medium]
+    [videos, query, frames, poster]
   );
 
   return (
     <div class="episode-cards">
-      {episodes.map(({ video, frame, preview }) => {
+      {episodes.map(({ video, preview }) => {
         const selected = episode === video.number;
         const entry = [history, ...checkpoints]
           .filter((entry): entry is WatchEntry => !!entry && entry.episode === video.number)
@@ -161,27 +172,33 @@ export const EpisodeOptions: FC<TEpisodeOptionsProps> = ({
         const percent = saved.duration > 0 ? (saved.position / saved.duration) * 100 : 0;
 
         return (
-          <button
+          <EpisodeWithDownload
             key={video.number}
-            aria-label={`Серия ${video.number}`}
-            aria-pressed={selected}
-            class={`episode-card ${selected ? 'selected' : ''}`}
-            onClick={() => onSelect(video.number)}
+            episode={video.number}
+            selected={selected}
+            downloads={downloads}
+            onOpenSaved={onOpenSaved}
           >
-            <EpisodePreview
-              src={preview}
-              progress={percent}
-              duration={saved.duration > 0 ? formatTime(saved.duration) : undefined}
-              icon={percent >= 95 ? 'check' : 'play'}
-            />
-            <EpisodeCaption title={`Серия ${video.number}`}>
-              {saved.position > 0
-                ? `Просмотрено ${formatTime(saved.position)}`
-                : frame
-                  ? 'Смотреть'
-                  : 'Без превью'}
-            </EpisodeCaption>
-          </button>
+            <button
+              aria-label={`Серия ${video.number}`}
+              aria-pressed={selected}
+              class={`episode-card ${selected ? 'selected' : ''}`}
+              onClick={() => onSelect(video.number)}
+            >
+              <EpisodePreview
+                src={preview}
+                frameKey={watchFrameKey(anime.anime_id, video.number, accountId)}
+                cacheOnly={cacheOnly}
+                fallbackSrc={poster}
+                progress={percent}
+                duration={saved.duration > 0 ? formatTime(saved.duration) : undefined}
+                icon={percent >= 95 ? 'check' : 'play'}
+              />
+              <EpisodeCaption title={`Серия ${video.number}`}>
+                {saved.position > 0 ? `Просмотрено ${formatTime(saved.position)}` : 'Смотреть'}
+              </EpisodeCaption>
+            </button>
+          </EpisodeWithDownload>
         );
       })}
     </div>

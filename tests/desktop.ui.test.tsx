@@ -290,7 +290,7 @@ describe('desktop IPC and application chrome', () => {
     render(
       <>
         <WindowChrome />
-        <InterfaceEffects onBack={back} watching />
+        <InterfaceEffects onBack={back} />
         <DesktopPlayer />
       </>
     );

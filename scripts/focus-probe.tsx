@@ -46,7 +46,7 @@ render(
     <CursorProbe />
   ) : (
     <div class="media-app">
-      <InterfaceEffects watching={false} onBack={() => {}} />
+      <InterfaceEffects onBack={() => {}} />
       <div class="media-workspace" style={{ paddingLeft: 0 }}>
         <main id="main" class="media-scroll" tabIndex={-1}>
           <div class="media-scroll-content">

@@ -72,6 +72,17 @@ describe('profile experience', () => {
     );
   });
 
+  it('offers login on the People tab without requesting guests-only data', () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    const { container } = render(<ProfilePage query="tab=friends" />);
+    expect(screen.getByRole('heading', { name: 'Войди, чтобы найти друзей' })).toBeTruthy();
+    expect(
+      container.querySelector('[data-app-href="#/account?next=%2Fprofile%3Ftab%3Dfriends"]')
+    ).toBeTruthy();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('searches, sorts and filters the collection while favorites stay independent of status', async () => {
     setAnimeList(anime, 2);
     toggleFavorite(anime);

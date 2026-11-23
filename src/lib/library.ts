@@ -16,6 +16,8 @@ import {
   clearHistory as clearGuestHistory,
   LIBRARY_EVENT,
   readLibrary,
+  readJSON,
+  writeJSON,
   recordWatch as recordGuestWatch,
   removeHistoryEntry,
   setAnimeList as setGuestList,
@@ -86,15 +88,36 @@ export function getLibraryState(): LibraryState {
   const session = getSession();
   const state = session ? stateFor(session.token) : undefined;
 
+  const guest = state ? undefined : readLibrary();
+  const pending = state
+    ? Object.values(readWatchActivity()).filter(entry => entry.pending !== undefined)
+    : [];
+  const lists =
+    state && pending.length
+      ? Object.fromEntries(
+          WATCH_LISTS.map(({ id }) => [
+            id,
+            [
+              ...pending.filter(entry => entry.pending === id).map(entry => entry.anime),
+              ...(state.lists?.[id] || []).filter(
+                anime => !pending.some(entry => entry.anime.anime_id === anime.anime_id)
+              ),
+            ],
+          ])
+        )
+      : state?.lists;
+
   return state
     ? {
         ...state,
+        lists,
         history: mergeContinueHistory(readContinueHistory(), state.history).filter(
           entry => !isContinueHidden(entry.anime.anime_id)
         ),
       }
     : {
-        ...readLibrary(),
+        ...guest!,
+        history: guest!.history.filter(entry => !isContinueHidden(entry.anime.anime_id)),
         account: false,
         loading: false,
         error: '',
@@ -126,7 +149,7 @@ export function normalizeHistory(values: RemoteWatch[]): WatchEntry[] {
     if (!value?.anime_id || !value.title || result.has(value.anime_id)) continue;
     result.set(value.anime_id, {
       anime: normalizeAnime(value),
-      episode: String(value.ep_title || value.number || ''),
+      episode: String(value.number || value.ep_title || ''),
       group: value.data
         ? JSON.stringify([value.data.player_id, value.data.player, value.data.dubbing])
         : '',
@@ -188,6 +211,7 @@ export function syncLibrary(): Promise<void> {
         };
         accountState.history = syncContinueHistory(accountState.history, token);
         historyOffset = history.length;
+        queueMicrotask(() => runWatchMaintenance());
       }
     } catch (error) {
       if (getSession()?.token === token && owner === token)
@@ -360,20 +384,21 @@ export async function recordWatch(
   group: string,
   position?: number,
   duration?: number,
-  expectedToken: string | null = getSession()?.token || null
+  expectedToken: string | null = getSession()?.token || null,
+  startedAt?: number
 ) {
   const session = getSession();
 
   // A player belonging to a previous session must never write to the new account.
   if ((session?.token || null) !== expectedToken) return;
+  restoreContinue(anime.anime_id, startedAt);
   if (!session) {
+    if (isContinueHidden(anime.anime_id)) return;
     recordGuestWatch(anime, video, group, position, duration);
 
     return;
   }
   if (!session.verified) throw new Error('Войди снова, чтобы сохранить просмотр в Yummy.');
-  restoreContinue(anime.anime_id);
-
   const state = stateFor(session.token);
   const previous = state.history.find(entry => entry.anime.anime_id === anime.anime_id);
   const same =
@@ -396,7 +421,7 @@ export async function recordWatch(
       const success = await yummyFetch<boolean>(`/video/${video.video_id}`, {
         token: session.token,
         method: 'PUT',
-        body: { time, duration: length, date: Math.floor(Date.now() / 1000) },
+        body: { time, duration: length, date: Math.floor(recordedAt / 1000) },
         keepalive: true,
       });
 
@@ -434,18 +459,230 @@ export function clearHistory() {
   clearGuestHistory();
 }
 
-/** Dismiss locally; remote account history is retained on YummyAnime. */
 export function removeContinue(animeId: number) {
   if (!Number.isSafeInteger(animeId) || animeId <= 0) throw new Error('Неизвестное аниме.');
-  if (getSession()) {
-    hideContinue(animeId);
-    emit();
-  } else removeHistoryEntry(animeId);
+  const library = getLibraryState();
+  const active = library.history.find(entry => entry.anime.anime_id === animeId)?.anime;
+  const activity = readWatchActivity()[animeId];
+  const anime = active || activity?.anime;
+  hideContinue(animeId);
+  if (!getSession()) removeHistoryEntry(animeId);
+  else emit();
+  if (anime) {
+    if (activity?.status === 2 || selectedList(library, animeId) === 2) return;
+    queueWatchList(anime, 5, Date.now());
+  }
+}
+
+type WatchActivity = {
+  anime: Anime;
+  last: number;
+  begun?: number;
+  manualAt?: number;
+  status?: WatchListId;
+  from?: WatchListId;
+  baseKnown?: boolean;
+  pending?: WatchListId;
+};
+
+const activityKey = () => {
+  const user = getSession()?.user.id;
+  return `yumiwatch:watch-activity:v1:${user ? `account:${user}` : 'guest'}`;
+};
+const readWatchActivity = () => readJSON<Record<number, WatchActivity>>(activityKey(), {});
+const automaticWrites = new Map<string, Promise<void>>();
+const inactiveTime = 30 * 24 * 60 * 60 * 1000;
+
+function selectedList(library: Library, id: number) {
+  return WATCH_LISTS.find(list => library.lists?.[list.id]?.some(anime => anime.anime_id === id))
+    ?.id;
+}
+
+function storeActivity(anime: Anime, patch: Partial<WatchActivity>) {
+  const entries = readWatchActivity();
+  const compact: Anime = {
+    anime_id: anime.anime_id,
+    anime_url: anime.anime_url,
+    title: anime.title,
+    poster: anime.poster,
+    year: anime.year,
+    type: anime.type,
+    anime_status: anime.anime_status,
+    episodes: anime.episodes,
+  };
+  const previous = entries[anime.anime_id] || { anime: compact, last: 0 };
+  const next = { ...previous, ...patch };
+  next.anime = {
+    ...next.anime,
+    ...compact,
+    anime_status: anime.anime_status || next.anime.anime_status,
+    episodes: anime.episodes || next.anime.episodes,
+  };
+  entries[anime.anime_id] = next;
+  writeJSON(activityKey(), entries);
+}
+
+function queueWatchList(anime: Anime, status: WatchListId, at: number) {
+  const activity = readWatchActivity()[anime.anime_id];
+  if ((activity?.manualAt ?? 0) > at) return;
+  const session = getSession();
+  const library = session ? stateFor(session.token) : readLibrary();
+  const from = selectedList(library, anime.anime_id);
+  if (!session) {
+    storeActivity(anime, { status, pending: undefined });
+    if (from !== status) setGuestList(anime, status);
+    return;
+  }
+  const pending = from !== status || automaticWrites.has(`${activityKey()}:${anime.anime_id}`);
+  storeActivity(anime, {
+    status,
+    pending: pending ? status : undefined,
+    from,
+    baseKnown: !!accountState.syncedAt,
+  });
+  applyWatchLists();
+  if (pending) emit();
+}
+
+function applyWatchLists() {
+  const session = getSession();
+  if (!session?.verified || !stateFor(session.token).syncedAt || navigator.onLine === false) return;
+  const token = session.token;
+  const scope = activityKey();
+  for (const entry of Object.values(readWatchActivity())) {
+    const target = entry.pending;
+    if (target === undefined) continue;
+    const id = entry.anime.anime_id;
+    const key = `${scope}:${id}`;
+    if (automaticWrites.has(key)) continue;
+    const current = selectedList(stateFor(session.token), id);
+    if (current === target || (entry.baseKnown && current !== entry.from)) {
+      storeActivity(entry.anime, { pending: undefined, status: current });
+      continue;
+    }
+    const write = commitAnimeList(entry.anime, target);
+    automaticWrites.set(key, write);
+    void write
+      .then(() => {
+        if ((getSession()?.token || null) !== token) return;
+        const latest = readWatchActivity()[id];
+        if (latest?.pending === target) storeActivity(entry.anime, { pending: undefined });
+        else if (latest?.pending !== undefined)
+          storeActivity(entry.anime, { from: target, baseKnown: true });
+      })
+      .catch(() => {})
+      .finally(() => {
+        automaticWrites.delete(key);
+        if (
+          (getSession()?.token || null) === token &&
+          readWatchActivity()[id]?.pending !== target
+        ) {
+          applyWatchLists();
+          emit();
+        }
+      });
+  }
+}
+
+type WatchActivityKind = 'start' | 'progress' | 'complete';
+
+export function watchActivity(
+  anime: Anime,
+  video: Video,
+  token: string | null,
+  run: number,
+  kind: WatchActivityKind
+) {
+  if ((getSession()?.token || null) !== token) return;
+  try {
+    updateWatchActivity(anime, video, token, run, kind);
+  } catch {
+    // Recording progress remains usable if list changes cannot be saved.
+  }
+}
+
+function updateWatchActivity(
+  anime: Anime,
+  video: Video,
+  token: string | null,
+  run: number,
+  kind: WatchActivityKind
+) {
+  const current = readWatchActivity()[anime.anime_id];
+  if ((current?.begun ?? 0) > run || (current?.manualAt ?? 0) > run) return;
+  const now = Date.now();
+  if (kind === 'progress' && current?.last && now - current.last < 60000) return;
+  if (kind === 'start') {
+    if (current?.begun === run) return;
+    restoreContinue(anime.anime_id, run);
+    if (isContinueHidden(anime.anime_id)) return;
+    storeActivity(anime, { last: now, begun: run });
+    queueWatchList(anime, 0, run);
+  } else if (kind === 'progress') {
+    if (!isContinueHidden(anime.anime_id)) storeActivity(anime, { last: now, begun: run });
+  } else {
+    const title = anime.anime_status ? anime : current?.anime || anime;
+    const count = title.episodes?.count;
+    const film = title.type?.alias === 'movie' || title.type?.alias === 'shortfilm';
+    const lastEpisode =
+      count &&
+      title.episodes?.aired === count &&
+      /^\d+$/.test(video.number) &&
+      Number(video.number) === count;
+    const onlyFilm = film && (!count || count === 1) && ['0', '1'].includes(video.number);
+    const finale = title.anime_status?.alias === 'released' && (lastEpisode || onlyFilm);
+    if (!finale) return;
+    hideContinue(anime.anime_id, Math.max(now, run));
+    if (!token) removeHistoryEntry(anime.anime_id);
+    else emit();
+    storeActivity(anime, { last: now, begun: run });
+    queueWatchList(anime, 2, run);
+  }
+}
+
+export function runWatchMaintenance() {
+  const library = getLibraryState();
+  if (library.account && (!library.syncedAt || library.loading)) return;
+  if (library.account && Date.now() - library.syncedAt > 60000) {
+    applyWatchLists();
+    return;
+  }
+  const entries = readWatchActivity();
+  for (const anime of library.lists?.[0] || []) {
+    const id = anime.anime_id;
+    const entry = entries[id];
+    const history = library.history.find(value => value.anime.anime_id === id);
+    const last = Math.max(entry?.last || 0, entry?.manualAt || 0, history?.updatedAt || 0);
+    if (!last || Date.now() - last < inactiveTime || entry?.pending !== undefined) continue;
+    const metadata = anime.anime_status ? anime : entry?.anime || anime;
+    if (
+      metadata.anime_status?.alias === 'ongoing' &&
+      (!metadata.episodes?.aired || !history || Number(history.episode) >= metadata.episodes.aired)
+    )
+      continue;
+    queueWatchList(anime, 3, Date.now());
+  }
+  applyWatchLists();
 }
 
 const listPending = new Set<string>();
 
 export async function setAnimeList(anime: Anime, selected: WatchListId | null) {
+  if (selected !== null && !isWatchList(selected)) throw new Error('Неизвестный список.');
+  const token = getSession()?.token || null;
+  const pending = automaticWrites.get(`${activityKey()}:${anime.anime_id}`);
+  if (pending) await pending.catch(() => {});
+  if ((getSession()?.token || null) !== token) return;
+  await commitAnimeList(anime, selected);
+  if ((getSession()?.token || null) === token)
+    storeActivity(anime, {
+      manualAt: Date.now(),
+      status: selected ?? undefined,
+      pending: undefined,
+    });
+}
+
+async function commitAnimeList(anime: Anime, selected: WatchListId | null) {
   if (selected !== null && !isWatchList(selected)) throw new Error('Неизвестный список.');
 
   const session = getSession();

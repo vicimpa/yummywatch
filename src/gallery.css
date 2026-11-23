@@ -177,12 +177,12 @@
   border-radius: 7px;
   transition: outline-color 0.15s;
 }
-.gallery-rail .anime-card:focus-within .card-image,
-.gallery-grid .anime-card:focus-within .card-image {
+html:not([data-input-mode='pointer']) .gallery-rail .anime-card:focus-within .card-image,
+html:not([data-input-mode='pointer']) .gallery-grid .anime-card:focus-within .card-image {
   outline: none;
 }
-.gallery-rail .card-title:focus-visible,
-.gallery-grid .card-title:focus-visible {
+html:not([data-input-mode='pointer']) .gallery-rail .card-title:focus-visible,
+html:not([data-input-mode='pointer']) .gallery-grid .card-title:focus-visible {
   outline: none;
 }
 .gallery-rail .anime-card {
@@ -254,13 +254,24 @@
   line-clamp: 2;
   overflow: hidden;
 }
-.gallery-shelf:has(.gallery-continue) .gallery-rail {
+.continue-watching .gallery-rail {
   grid-auto-columns: clamp(250px, 30vw, 365px);
 }
-.gallery-continue:focus-visible {
-  outline: 3px solid var(--accent);
-  outline-offset: 3px;
-  border-radius: 6px;
+html[data-input-mode='keyboard'] .gallery-rail .gallery-continue:focus {
+  outline: none;
+}
+html[data-input-mode='keyboard'] .gallery-continue:focus .continue-image::before {
+  content: '';
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  border: 2px solid var(--keyboard-focus-stroke, var(--accent));
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px #251719b3;
+  pointer-events: none;
+}
+html[data-input-mode='keyboard'] .gallery-continue:focus h3 {
+  color: var(--keyboard-focus-stroke, var(--accent));
 }
 .gallery-query {
   display: flex;
@@ -513,7 +524,7 @@
   .gallery-grid .card-caption p {
     font-size: 11px;
   }
-  .gallery-shelf:has(.gallery-continue) .gallery-rail {
+  .continue-watching .gallery-rail {
     grid-auto-columns: 260px;
   }
   .catalog-gallery .results-heading {

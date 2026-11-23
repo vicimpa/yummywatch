@@ -67,9 +67,7 @@ export const Gallery: FC<TGalleryProps> = ({ active = true, liveWatch }) => {
     [],
     () => peekAnimeList({ status: 'announcement', sort: 'views', sort_forward: false, limit: 12 })
   );
-  const screen = useRef<HTMLElement>(null),
-    wasActive = useRef(active);
-  const focusedAnime = useRef<number>();
+  const wasActive = useRef(active);
   const library = useLibrary();
   const [feature, setFeature] = useState<Anime>();
   const liveAnime = Number(liveWatch?.path.split('?')[0]?.split('/')[2]);
@@ -82,14 +80,6 @@ export const Gallery: FC<TGalleryProps> = ({ active = true, liveWatch }) => {
       ongoing.retry();
       popular.retry();
       announces.retry();
-      const frame = requestAnimationFrame(() =>
-        screen.current
-          ?.querySelector<HTMLAnchorElement>(
-            `[data-gallery-link][data-app-href="#/anime/${focusedAnime.current}?view=anime-about"]`
-          )
-          ?.focus({ preventScroll: true })
-      );
-      return () => cancelAnimationFrame(frame);
     }
   }, [active]);
 
@@ -129,15 +119,7 @@ export const Gallery: FC<TGalleryProps> = ({ active = true, liveWatch }) => {
           >
             {resource.loading
               ? Array.from({ length: 6 }, (_, index) => <CardSkeleton key={index} />)
-              : resource.value?.data.map(anime => (
-                  <AnimeCard
-                    key={anime.anime_id}
-                    anime={anime}
-                    onFocus={() => {
-                      focusedAnime.current = anime.anime_id;
-                    }}
-                  />
-                ))}
+              : resource.value?.data.map(anime => <AnimeCard key={anime.anime_id} anime={anime} />)}
           </GalleryShelf>
         )}
         {resource.value?.cached && !resource.refreshing && (
@@ -149,20 +131,71 @@ export const Gallery: FC<TGalleryProps> = ({ active = true, liveWatch }) => {
   );
 
   return (
-    <section
-      ref={screen}
-      class="gallery-screen"
-      aria-label="Галерея аниме"
-      onKeyDown={navigateGallery}
-    >
+    <section class="gallery-screen" aria-label="Галерея аниме" onKeyDown={navigateGallery}>
       <header class="gallery-heading">
         <div>
           <h1>Каталог</h1>
           <p>Твои истории и новые открытия</p>
         </div>
       </header>
+      {!!library.history.length && (
+        <GalleryShelf
+          title="Продолжить просмотр"
+          className="continue-watching"
+          href="#/profile?tab=history"
+          count={library.history.length}
+        >
+          {library.history.slice(0, 12).map(entry => {
+            const live = entry.anime.anime_id === liveAnime ? liveWatch : undefined;
+            return (
+              <article
+                class="gallery-continue-card"
+                data-gallery-item
+                key={entry.anime.anime_id}
+                {...cardMenuEvents(entry.anime)}
+              >
+                <AppLink
+                  class="gallery-continue"
+                  data-gallery-link
+                  href={
+                    live ? '#' + live.path : `#/anime/${entry.anime.anime_id}?view=watch&play=1`
+                  }
+                  publicHref={animeSiteUrl(entry.anime)}
+                >
+                  <ContinuePreview entry={entry} live={live} />
+                  <h3>{entry.anime.title}</h3>
+                </AppLink>
+                <button
+                  type="button"
+                  class="continue-remove"
+                  data-tv-skip
+                  aria-label={`Убрать «${entry.anime.title}» из «Продолжить просмотр»`}
+                  title="Убрать из «Продолжить просмотр»"
+                  onClick={event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    try {
+                      removeContinue(entry.anime.anime_id);
+                      notify('Убрано из «Продолжить просмотр»');
+                    } catch (error) {
+                      notify((error as Error).message);
+                    }
+                  }}
+                >
+                  <Icon name="close" size={18} />
+                </button>
+              </article>
+            );
+          })}
+        </GalleryShelf>
+      )}
       {feature && (
-        <section class="gallery-feature" aria-label="Выбранное аниме" {...cardMenuEvents(feature)}>
+        <section
+          class="gallery-feature"
+          aria-label="Выбранное аниме"
+          data-tv-focus-group
+          {...cardMenuEvents(feature)}
+        >
           <div class="gallery-feature-poster">
             <Poster key={feature.anime_id} anime={feature} large />
           </div>
@@ -204,55 +237,6 @@ export const Gallery: FC<TGalleryProps> = ({ active = true, liveWatch }) => {
             </div>
           </div>
         </section>
-      )}
-      {!!library.history.length && (
-        <GalleryShelf
-          title="Продолжить просмотр"
-          href="#/profile?tab=history"
-          count={library.history.length}
-        >
-          {library.history.slice(0, 12).map(entry => {
-            const live = entry.anime.anime_id === liveAnime ? liveWatch : undefined;
-            return (
-              <article
-                class="gallery-continue-card"
-                data-gallery-item
-                key={entry.anime.anime_id}
-                {...cardMenuEvents(entry.anime)}
-              >
-                <AppLink
-                  class="gallery-continue"
-                  data-gallery-link
-                  href={
-                    live ? '#' + live.path : `#/anime/${entry.anime.anime_id}?view=watch&play=1`
-                  }
-                  publicHref={animeSiteUrl(entry.anime)}
-                >
-                  <ContinuePreview entry={entry} live={live} />
-                  <h3>{entry.anime.title}</h3>
-                </AppLink>
-                <button
-                  type="button"
-                  class="continue-remove"
-                  aria-label={`Убрать «${entry.anime.title}» из «Продолжить просмотр»`}
-                  title="Убрать из «Продолжить просмотр»"
-                  onClick={event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    try {
-                      removeContinue(entry.anime.anime_id);
-                      notify('Убрано из «Продолжить просмотр»');
-                    } catch (error) {
-                      notify((error as Error).message);
-                    }
-                  }}
-                >
-                  <Icon name="close" size={18} />
-                </button>
-              </article>
-            );
-          })}
-        </GalleryShelf>
       )}
       {shelf(
         ongoing,

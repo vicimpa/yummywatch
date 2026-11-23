@@ -447,6 +447,7 @@ describe('mobile navigation state', () => {
     expect(container.querySelector('.topbar,.mobile-tabs,.site-footer,iframe')).toBeNull();
     expect(container.querySelector('video')).not.toBeNull();
     expect(container.querySelector('.media-nav')?.hasAttribute('inert')).toBe(true);
+    expect(container.querySelector('.watch-state-back')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Об аниме' }));
     await screen.findByRole('link', { name: /(Начать|Продолжить) просмотр/ });
     expect(screen.getByRole('navigation', { name: 'Разделы медиакаталога' })).toBeTruthy();

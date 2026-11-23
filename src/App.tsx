@@ -11,6 +11,7 @@ import { useReleaseUpdate } from '~/hooks/useReleaseUpdate';
 import { useYummyRealtime } from '~/hooks/useYummyRealtime';
 import { useHash, useSession, useVisualViewport } from '~/lib/hooks';
 import { isDesktopWindow } from '~/lib/desktop';
+import { isTvMode } from '~/lib/tv-mode';
 import { usesMacNativePlayback } from '~/lib/native-playback';
 
 import { InterfaceEffects } from '~/components/InterfaceEffects';
@@ -34,6 +35,7 @@ const titles: Partial<Record<string, string>> = {
   '/': 'Каталог',
   '/catalog': 'Каталог',
   '/schedule': 'Расписание',
+  '/downloads': 'Загрузки',
   '/settings': 'Настройки',
   '/settings/connection': 'Подключение',
   '/account': 'Аккаунт',
@@ -64,6 +66,8 @@ export const App: FC = () => {
     ['/', '/catalog', '/search', '/profile', '/messages', '/notifications', '/schedule'].includes(
       route
     ) ||
+    route === '/downloads' ||
+    route.startsWith('/downloads/anime/') ||
     route.startsWith('/users/')
   )
     browseReturn.current = path;
@@ -89,12 +93,8 @@ export const App: FC = () => {
 
   useLayoutEffect(() => {
     document.documentElement.dataset.screen = detailRoute ? detailView : route.slice(1) || 'home';
-    document.title = `${titles[route] ?? (route.startsWith('/users/') ? 'Профиль' : 'Аниме')} · YummyWatch`;
+    document.title = `${titles[route] ?? (route.startsWith('/users/') ? 'Профиль' : route.startsWith('/downloads/') ? 'Загрузки' : 'Аниме')} · YummyWatch`;
   }, [path]);
-
-  useLayoutEffect(() => {
-    if (route !== '/search') document.getElementById('main')?.focus({ preventScroll: true });
-  }, [route]);
 
   const goBack = useCallback(() => {
     navigateBack(detailRoute ? (detailView === 'watch' ? route : browseReturn.current) : '/');
@@ -109,7 +109,7 @@ export const App: FC = () => {
     <div class={`media-app ${watching ? 'is-playback' : ''}`}>
       <WindowChrome watching={watching} />
       <WindowCursor />
-      <InterfaceEffects onBack={goBack} watching={watching} />
+      <InterfaceEffects path={path} onBack={goBack} />
       <div class="media-backdrop" aria-hidden="true" />
 
       <MediaNavigation
@@ -135,7 +135,7 @@ export const App: FC = () => {
         }
       />
       <div class={`workspace media-workspace ${detailRoute ? 'detail-workspace' : ''}`}>
-        {!sidebarHistory && <NavigationHistory path={path} hidden={watching} />}
+        {!sidebarHistory && !isTvMode() && <NavigationHistory path={path} hidden={watching} />}
         {!watching && !online && (
           <div class="offline-bar" role="status">
             <Icon name="wifi" size={17} />

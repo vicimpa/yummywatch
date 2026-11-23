@@ -1,4 +1,5 @@
 mod protocol;
+mod relay;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -216,6 +217,7 @@ extern "C" {
         url: *const c_char,
         caption: *const c_char,
         kind: *const c_char,
+        referrer: *const c_char,
         start: f64,
         media_io: *const protocol::MediaIO,
         scale: *const c_char,
@@ -237,7 +239,12 @@ extern "C" {
         context: *mut c_void,
         complete: unsafe extern "C" fn(*mut c_void, *const u8, usize),
     );
-    fn yw_video_set_thumbnail_source(player: *mut c_void, url: *const c_char, kind: *const c_char);
+    fn yw_video_set_thumbnail_source(
+        player: *mut c_void,
+        url: *const c_char,
+        kind: *const c_char,
+        referrer: *const c_char,
+    );
     fn yw_video_frame(
         player: *mut c_void,
         context: *mut c_void,
@@ -366,6 +373,27 @@ fn for_view(
     Ok(receiver)
 }
 
+async fn player_url(
+    backend: &crate::backend::Backend,
+    url: &str,
+    kind: Kind,
+) -> Result<(CString, Kind), String> {
+    // FFmpeg's DASH demuxer opens child segments over HTTP(S). Use the
+    // existing loopback transport for DASH so it sees the shared disk cache.
+    if matches!(kind, Kind::Dash) {
+        let (url, kind) = match url::Url::parse(url) {
+            Ok(manifest) if crate::providers::is_aksor_media_url(&manifest) => {
+                (backend.aksor_hls(manifest).await?, Kind::Hls)
+            }
+            _ => (url.to_owned(), kind),
+        };
+        let (url, _) = relay::media_url(backend, &url, kind.extension()).await?;
+        let url = CString::new(url).map_err(|_| "Некорректный адрес видео.")?;
+        return Ok((url, kind));
+    }
+    Ok((protocol::url(url, kind.extension())?, kind))
+}
+
 #[tauri::command]
 pub async fn native_video(
     window: tauri::WebviewWindow,
@@ -385,13 +413,14 @@ pub async fn native_video(
             upscale,
             sharpen,
         } => {
-            protocol::init(&window.state::<crate::backend::Backend>());
-            let url = protocol::url(&url, kind.extension())?;
-            let preview = preview.and_then(|preview| {
-                protocol::url(&preview.url, preview.kind.extension())
-                    .ok()
-                    .map(|url| (url, preview.kind))
-            });
+            let backend = window.state::<crate::backend::Backend>();
+            protocol::init(&backend);
+            let (url, kind) = player_url(&backend, &url, kind).await?;
+            let preview = if let Some(preview) = preview {
+                player_url(&backend, &preview.url, preview.kind).await.ok()
+            } else {
+                None
+            };
             let caption = caption
                 .as_deref()
                 .map(|url| protocol::url(url, "vtt"))
@@ -416,6 +445,7 @@ pub async fn native_video(
                     #[cfg(not(debug_assertions))]
                     let library: Option<CString> = None;
                     let mut error = ptr::null();
+                    let referrer = crate::providers::native_aksor_referrer(&url);
                     let player = unsafe {
                         yw_video_open(
                             view,
@@ -423,6 +453,7 @@ pub async fn native_video(
                             url.as_ptr(),
                             caption.as_ref().map_or(ptr::null(), |url| url.as_ptr()),
                             kind.demuxer().as_ptr(),
+                            referrer.as_deref().map_or(ptr::null(), CStr::as_ptr),
                             start.clamp(0.0, 86400.0),
                             &protocol::MEDIA_IO,
                             upscale.scale.as_ptr(),
@@ -439,11 +470,13 @@ pub async fn native_video(
                             .into_owned()
                     })?;
                     if let Some((url, kind)) = preview {
+                        let referrer = crate::providers::native_aksor_referrer(&url);
                         unsafe {
                             yw_video_set_thumbnail_source(
                                 player.as_ptr(),
                                 url.as_ptr(),
                                 kind.demuxer().as_ptr(),
+                                referrer.as_deref().map_or(ptr::null(), CStr::as_ptr),
                             );
                         }
                     }

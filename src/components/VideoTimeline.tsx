@@ -157,6 +157,7 @@ export function VideoTimeline({
         min="0"
         max={duration || 0}
         step="0.1"
+        data-tv-timeline
         value={Math.min(position, duration)}
         disabled={!duration}
         aria-label="Позиция воспроизведения"

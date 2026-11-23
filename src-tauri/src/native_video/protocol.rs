@@ -24,10 +24,18 @@ pub(super) fn url(raw: &str, extension: &str) -> Result<CString, String> {
     }
     let value = match (url.scheme(), host) {
         ("yumiwatch-media", "localhost") | ("http" | "https", "yumiwatch-media.localhost") => {
-            if !resource_path(url.path()) || url.query().is_some() || url.fragment().is_some() {
+            let saved = crate::downloads::route(url.path()).is_some();
+            if (!saved && !resource_path(url.path()))
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
                 return Err("Некорректный ресурс видеопотока.".into());
             }
-            format!("{MEDIA_ROOT}{}.{extension}", url.path())
+            if saved {
+                format!("{MEDIA_ROOT}{}", url.path())
+            } else {
+                format!("{MEDIA_ROOT}{}.{extension}", url.path())
+            }
         }
         ("https", host) if !host.is_empty() => url.into(),
         _ => return Err("Некорректный адрес видео.".into()),
@@ -123,6 +131,14 @@ impl Interrupt {
 impl Stream {
     fn from_url(raw: &str) -> Option<Self> {
         let path = raw.strip_prefix(MEDIA_ROOT)?;
+        if let Some((_, name)) = crate::downloads::route(path) {
+            return Some(Self {
+                path: path.into(),
+                manifest: name.ends_with(".m3u8") || name.ends_with(".mpd"),
+                position: 0,
+                chunk: None,
+            });
+        }
         let (path, extension) = match path.split_once('.') {
             Some((path, extension @ ("m3u8" | "mp4" | "mpd" | "vtt"))) => (path, extension),
             None => (path, ""),

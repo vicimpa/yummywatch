@@ -77,9 +77,10 @@ export const AnimeCard: FC<TAnimeCardProps> = ({ anime, rank, onOpen, onFocus, o
 export type TAnimeRowProps = { anime: Anime; onOpen?: () => void };
 
 export const AnimeRow: FC<TAnimeRowProps> = ({ anime, onOpen }) => (
-  <article class="anime-result-row" {...cardMenuEvents(anime)}>
+  <article class="anime-result-row" data-gallery-item {...cardMenuEvents(anime)}>
     <AppLink
       class="result-main"
+      data-gallery-link
       href={`#/anime/${anime.anime_id}?view=anime-about`}
       publicHref={animeSiteUrl(anime)}
       onClick={onOpen}

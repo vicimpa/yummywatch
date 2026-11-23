@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, waitFor } from '@testing-library/preact';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/preact';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import { WatchPreview } from '~/components/WatchPreview';
-import { getCache } from '~/lib/cache-store';
+import { EpisodeOptions } from '~/components/PlayerOptions';
+import { getCache, putCache } from '~/lib/cache-store';
 import { storeWatchFrame } from '~/lib/image-cache';
 import type { PlaybackMedia } from '~/lib/playback-media';
+import type { Video } from '~/lib/types';
 import { clearSession, saveSession } from '~/lib/session';
 import { trackWatchFrames, watchFrameKey } from '~/lib/watch-frames';
 import { anime } from './fixtures';
@@ -99,4 +101,51 @@ it('uses the account frame in history and falls back to the episode screenshot f
   await waitFor(() =>
     expect(container.querySelector('img')?.getAttribute('src')).toBe(entry.preview)
   );
+});
+
+it('shows watched and cached provider frames in the offline episode list without fetching missing images', async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  const watched = new Blob(['watch frame'], { type: 'image/jpeg' });
+  const screenshot = new Blob(['episode screenshot'], { type: 'image/jpeg' });
+  vi.mocked(URL.createObjectURL).mockImplementation(blob =>
+    blob === watched ? 'blob:watched-offline' : 'blob:cached-screenshot'
+  );
+  const title = {
+    ...anime,
+    anime_id: 505,
+    poster: { medium: 'https://static.yani.tv/offline-poster.jpg' },
+    random_screenshots: ['1', '2', '3'].map(episode => {
+      const url = `https://static.yani.tv/offline-preview-${episode}.jpg`;
+      return { episode, sizes: { small: url, full: url } };
+    }),
+  };
+  storeWatchFrame(watchFrameKey(title.anime_id, '1')!, watched, Date.now());
+  putCache('image', title.random_screenshots[1].sizes.small, screenshot);
+  const videos: Video[] = ['1', '2', '3'].map((number, index) => ({
+    number,
+    index,
+    video_id: 500 + index,
+    iframe_url: '',
+    data: { dubbing: 'Озвучка', player: 'CVH', player_id: 0 },
+  }));
+  render(
+    <EpisodeOptions
+      anime={title}
+      videos={videos}
+      episode="1"
+      query=""
+      cacheOnly
+      onSelect={vi.fn()}
+    />
+  );
+  expect(
+    screen.getByRole('button', { name: 'Серия 1' }).querySelector('img')?.getAttribute('src')
+  ).toBe('blob:watched-offline');
+  expect(
+    screen.getByRole('button', { name: 'Серия 2' }).querySelector('img')?.getAttribute('src')
+  ).toBe('blob:cached-screenshot');
+  expect(screen.getByRole('button', { name: 'Серия 3' }).querySelector('img')).toBeNull();
+  await act(async () => {});
+  expect(fetch).not.toHaveBeenCalled();
 });

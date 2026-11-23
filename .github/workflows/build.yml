@@ -8,6 +8,9 @@ on:
       mobile:
         type: boolean
         default: true
+      android_tv:
+        type: boolean
+        default: false
 permissions:
   contents: read
 env:
@@ -147,11 +150,12 @@ jobs:
           retention-days: 14
 
   android:
-    if: inputs.mobile
+    if: inputs.mobile || inputs.android_tv
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       NDK_VERSION: 28.2.13676358
+      ANDROID_BUILD_TOOLS_VERSION: 37.0.0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -166,14 +170,15 @@ jobs:
         with:
           packages: platform-tools
           log-accepted-android-sdk-licenses: false
-      - name: Android NDK
+      - name: Android build tools and NDK
         shell: bash
         run: |
-          sdkmanager "ndk;$NDK_VERSION"
+          sdkmanager "ndk;$NDK_VERSION" "build-tools;$ANDROID_BUILD_TOOLS_VERSION" "platforms;android-37.0"
           echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_BUILD_TOOLS=$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS_VERSION" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
@@ -202,16 +207,28 @@ jobs:
         if: ${{ !inputs.release }}
         run: npm run build:android -- --ci --debug --target aarch64 --apk -- --locked
       - name: Android release APK and AAB
-        if: inputs.release
+        if: inputs.release && inputs.mobile
         run: npm run build:android -- --ci --target aarch64 armv7 x86_64 --apk --aab -- --locked
         env:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      - name: Collect Android mobile packages
+        if: inputs.mobile
+        run: node scripts/collect-release.mjs android src-tauri/gen/android/app/build/outputs
+      - name: Build signed Android TV APKs
+        if: inputs.android_tv
+        run: npm run build:android:tv
+        env:
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      - name: Verify and collect Android TV APKs
+        if: inputs.android_tv
+        run: node scripts/collect-android-tv.mjs
       - name: Verify embedded application token
         if: inputs.release
         run: node scripts/check-application-token.mjs dist
-      - run: node scripts/collect-release.mjs android src-tauri/gen/android/app/build/outputs
       - uses: actions/upload-artifact@v4
         with:
           name: installers-android

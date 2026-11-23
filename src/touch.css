@@ -177,7 +177,6 @@
     flex-wrap: wrap;
   }
   .catalog-gallery .sort-label .settings-dropdown,
-  .about-episodes-voice .settings-dropdown,
   .media-sidebar .discussion-header .settings-dropdown,
   input:not([type='range']):not([type='checkbox']):not([type='radio']),
   textarea {
@@ -250,9 +249,6 @@
   }
   .anime-facts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .voice-gallery {
-    grid-template-columns: 1fr;
   }
   .mobile-sheet {
     inset: 0;
@@ -363,10 +359,10 @@
     bottom: calc(var(--phone-bottom) + 12px);
     max-width: calc(100vw - 32px);
   }
-  html[data-keyboard='open'] .phone-nav {
+  html:not([data-tv])[data-keyboard='open'] .phone-nav {
     display: none;
   }
-  html[data-keyboard='open'] .media-workspace {
+  html:not([data-tv])[data-keyboard='open'] .media-workspace {
     padding-bottom: 0;
     height: var(--visual-height, 100dvh);
   }

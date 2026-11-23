@@ -96,6 +96,7 @@ export const AutoActionCountdown: FC<TAutoActionCountdownProps> = ({
   const content = (
     <div
       class={`native-auto-action ${host ? 'is-in-sidebar' : ''}`}
+      data-tv-countdown
       role="group"
       aria-label={label}
     >
@@ -103,7 +104,7 @@ export const AutoActionCountdown: FC<TAutoActionCountdownProps> = ({
         {label} через <strong>{seconds}</strong> с
       </span>
       <div>
-        <Button aria-keyshortcuts="Escape" onClick={cancel}>
+        <Button aria-keyshortcuts="Escape" onClick={cancel} data-tv-close data-nav-primary>
           Отмена
         </Button>
         <Button onClick={runNow} variant="primary">

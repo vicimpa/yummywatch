@@ -24,13 +24,14 @@ YummyWatch — приложение для просмотра аниме из к
 
 Готовые установщики находятся в [GitHub Releases](https://github.com/vicimpa/yummywatch/releases/latest). Токен приложения уже включён: свой API-ключ для обычного использования не нужен. Node.js и Rust для установки не нужны.
 
-| Платформа  | Архитектура           | Пакеты                      |
-| ---------- | --------------------- | --------------------------- |
-| macOS 12+  | Apple Silicon (ARM64) | отдельный `.dmg`            |
-| macOS 12+  | Intel (x86_64)        | отдельный `.dmg`            |
-| Windows    | x64                   | `.exe` (NSIS), `.msi`       |
-| Linux      | x86_64                | `.deb`, `.rpm`, `.AppImage` |
-| Arch Linux | x86_64                | `.pkg.tar.zst` для pacman   |
+| Платформа  | Архитектура               | Пакеты                              |
+| ---------- | ------------------------- | ----------------------------------- |
+| macOS 12+  | Apple Silicon (ARM64)     | отдельный `.dmg`                    |
+| macOS 12+  | Intel (x86_64)            | отдельный `.dmg`                    |
+| Windows    | x64                       | `.exe` (NSIS), `.msi`               |
+| Linux      | x86_64                    | `.deb`, `.rpm`, `.AppImage`         |
+| Arch Linux | x86_64                    | `.pkg.tar.zst` для pacman           |
+| Android TV | ARM64, ARMv7, x86_64, x86 | [APK через ADB](docs/android-tv.md) |
 
 Windows и Linux воспроизводят видео через libmpv. Windows-установщики включают DLL. Linux-бинарник собирается на Ubuntu 24.04. AppImage включает libmpv, а DEB, RPM и Arch используют библиотеку дистрибутива. Пакет Arch собирается через `makepkg` и проверяется установкой в актуальном Arch Linux.
 
@@ -161,6 +162,10 @@ npm run dev:ios
 ```
 
 Android требует JDK, SDK/NDK и Rust targets. iOS — macOS, Xcode, CocoaPods и Apple development team. Сгенерированные проекты создаются закреплённой в lockfile версией Tauri CLI и не хранятся в Git. Подробности — в [инструкции по сборке и релизам](docs/releases.md).
+
+На Android TV включается облегчённый режим с управлением пультом и отключёнными анимациями. `npm run build:android:tv` собирает отдельные APK для `arm64-v8a`, `armeabi-v7a`, `x86_64` и `x86`. Чтобы собрать один APK, передай ABI, например `npm run build:android:tv -- armeabi-v7a`. Для подписи используй переменные из [инструкции по релизам](docs/releases.md). [Установка на телевизор через ADB](docs/android-tv.md)
+
+Android воспроизводит видео через libmpv на нативной поверхности с аппаратным декодированием MediaCodec. Сборка проверяет SHA-256 скачанных APK, из которых берёт libmpv и FFmpeg. [mpv-android 2025-08-25](https://github.com/mpv-android/mpv-android/releases/tag/2025-08-25)
 
 ## Документация
 

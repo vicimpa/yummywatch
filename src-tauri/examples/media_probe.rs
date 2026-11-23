@@ -4,6 +4,15 @@
 mod alloha;
 #[path = "../src/backend.rs"]
 mod backend;
+#[cfg(desktop)]
+#[path = "../src/download_dash.rs"]
+mod download_dash;
+#[cfg(desktop)]
+#[path = "../src/download_hls.rs"]
+mod download_hls;
+#[cfg(desktop)]
+#[path = "../src/downloads.rs"]
+mod downloads;
 #[path = "../src/images.rs"]
 mod images;
 #[path = "../src/media.rs"]

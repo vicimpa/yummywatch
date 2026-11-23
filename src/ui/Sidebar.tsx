@@ -1,10 +1,9 @@
 import type { ComponentChildren, FunctionalComponent as FC } from 'preact';
 import { createPortal } from 'preact/compat';
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useId, useLayoutEffect, useState } from 'preact/hooks';
 
 import { useMediaQuery } from '~/lib/hooks';
 import { interfaceSettings } from '~/lib/interface-settings';
-import { focusTarget, keyboardTargets } from '~/lib/keyboard-navigation';
 import { lockPageScroll } from '~/lib/page-scroll';
 
 import { Button } from './Button';
@@ -31,11 +30,7 @@ export const Sidebar: FC<TSidebarProps> = ({
 }) => {
   const mobile = useMediaQuery('(max-width: 760px), (max-width: 1000px) and (pointer: coarse)'),
     id = useId();
-  const element = useRef<HTMLElement>(null);
   const [present, setPresent] = useState(open);
-  const callbacks = useRef({ close });
-
-  callbacks.current = { close };
 
   useLayoutEffect(() => {
     if (open) {
@@ -61,67 +56,6 @@ export const Sidebar: FC<TSidebarProps> = ({
     return () => clearTimeout(timer);
   }, [open]);
 
-  useLayoutEffect(() => {
-    if (!open || !present) return;
-
-    const previous = document.activeElement as HTMLElement | null;
-    const frame = requestAnimationFrame(() => {
-      const button = element.current?.querySelector<HTMLButtonElement>('.sidebar-close');
-
-      if (button) focusTarget(button);
-    });
-
-    const keyboard = (event: KeyboardEvent) => {
-      if (document.querySelector('dialog[open],.video-settings,[data-card-context-menu]')) return;
-      if (
-        (event.key === 'Escape' || event.key === 'Backspace') &&
-        event.target instanceof HTMLElement &&
-        event.target.closest('[role=combobox][aria-expanded=true]')
-      )
-        return;
-      if (event.key === 'Escape' && element.current?.querySelector('.app-update-popover')) return;
-      if (
-        event.key === 'Escape' &&
-        event.target instanceof HTMLElement &&
-        event.target.closest('.native-auto-action')
-      )
-        return;
-      if (
-        event.key === 'Escape' ||
-        (event.key === 'Backspace' &&
-          !(
-            event.target instanceof HTMLElement &&
-            event.target.closest('input,textarea,[contenteditable]')
-          ))
-      ) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        callbacks.current.close();
-      }
-      if (event.key === 'Tab' && (mobile || !docked)) {
-        const targets = keyboardTargets(element.current!);
-        const first = targets[0],
-          last = targets.at(-1);
-
-        if (event.shiftKey && document.activeElement === first && last) {
-          event.preventDefault();
-          focusTarget(last);
-        } else if (!event.shiftKey && document.activeElement === last && first) {
-          event.preventDefault();
-          focusTarget(first);
-        }
-      }
-    };
-
-    window.addEventListener('keydown', keyboard, true);
-
-    return () => {
-      cancelAnimationFrame(frame);
-      window.removeEventListener('keydown', keyboard, true);
-      if (previous?.isConnected) previous.focus({ preventScroll: true });
-    };
-  }, [open, present, mobile, docked]);
-
   useEffect(() => {
     if (open && (mobile || !docked)) return lockPageScroll();
   }, [open, mobile, docked]);
@@ -141,7 +75,6 @@ export const Sidebar: FC<TSidebarProps> = ({
         />
       )}
       <aside
-        ref={element}
         class="media-sidebar"
         role={mobile || !docked ? 'dialog' : 'complementary'}
         aria-modal={mobile || !docked ? true : undefined}
@@ -155,7 +88,13 @@ export const Sidebar: FC<TSidebarProps> = ({
             <h2 id={id}>{title}</h2>
             {subtitle && <p>{subtitle}</p>}
           </div>
-          <Button aria-label="Закрыть панель" onClick={close} variant="icon" class="sidebar-close">
+          <Button
+            aria-label="Закрыть панель"
+            onClick={close}
+            variant="icon"
+            class="sidebar-close"
+            data-tv-close
+          >
             <Icon name="close" />
           </Button>
         </header>

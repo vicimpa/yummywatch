@@ -17,6 +17,24 @@ use crate::skips::provider_skips;
 
 pub type Result<T> = std::result::Result<T, String>;
 
+pub(crate) const AKSOR_MEDIA_REFERER: &str = "https://player.aksor.tv/";
+
+pub(crate) fn is_aksor_media_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url
+            .host_str()
+            .is_some_and(|host| host == "old.tut-video.net" || host.ends_with(".aksor.tv"))
+}
+
+#[cfg(any(desktop, target_os = "android"))]
+pub(crate) fn native_aksor_referrer(url: &std::ffi::CStr) -> Option<std::ffi::CString> {
+    let url = Url::parse(url.to_str().ok()?).ok()?;
+    is_aksor_media_url(&url).then(|| std::ffi::CString::new(AKSOR_MEDIA_REFERER).unwrap())
+}
+
 #[derive(Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Candidate {
@@ -49,18 +67,56 @@ impl Upstream for Client {
         } else {
             self.get(url)
         };
-        let response = builder
+        let builder = builder
             .headers(request.headers)
-            .timeout(Duration::from_secs(12))
-            .send()
-            .await
-            .map_err(|_| "Нет связи с источником.".to_string())?;
+            .timeout(Duration::from_secs(12));
+        let response = if matches!(provider_url(url), Ok((_, "kodik" | "aksor"))) {
+            send_with_server_retry(builder).await
+        } else {
+            builder.send().await
+        }
+        .map_err(|_| "Нет связи с источником.".to_string())?;
         let bytes = limited_body(response, 2_000_000).await?;
         // Match Fetch/Response.text(): replace invalid UTF-8 and strip a BOM.
         Ok(String::from_utf8_lossy(&bytes)
             .trim_start_matches('\u{feff}')
             .to_owned())
     }
+}
+
+pub(crate) async fn send_with_server_retry(
+    builder: reqwest::RequestBuilder,
+) -> reqwest::Result<reqwest::Response> {
+    let retry = builder.try_clone();
+    let response = builder.send().await?;
+    if let Some(retry) = retry.filter(|_| response.status().is_server_error()) {
+        drop(response);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        return retry.send().await;
+    }
+    Ok(response)
+}
+
+pub(crate) fn should_retry_with_proxy(message: &str) -> bool {
+    if message == "Aksor · нет манифеста DASH (HTTP 203)." {
+        return true;
+    }
+    if [
+        "Нет связи с источником.",
+        "Источник прервал ответ.",
+        "Источник не ответил вовремя.",
+    ]
+    .iter()
+    .any(|error| message.ends_with(error))
+    {
+        return true;
+    }
+    message
+        .rsplit_once("HTTP ")
+        .and_then(|(_, status)| status.strip_suffix('.'))
+        .map(|status| status.trim_end_matches(')'))
+        .and_then(|status| status.parse::<u16>().ok())
+        .is_some_and(|status| matches!(status, 403 | 451 | 500..=599))
 }
 
 pub async fn limited_body(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
@@ -270,7 +326,8 @@ pub async fn resolve(candidate: &Candidate, upstream: &impl Upstream) -> Result<
                         &format!("https://player.aksor.tv/api/video/{}", &id[1]),
                         Request::default(),
                     )
-                    .await?,
+                    .await
+                    .map_err(|error| format!("Aksor · список потоков. {error}"))?,
             )
             .map_err(|_| "Некорректный ответ Aksor.")?;
             let mut streams = Vec::new();
@@ -289,7 +346,10 @@ pub async fn resolve(candidate: &Candidate, upstream: &impl Upstream) -> Result<
             ("Aksor", data, String::new(), streams)
         }
         "kodik" => {
-            let html = upstream.text(url.as_str(), Request::default()).await?;
+            let html = upstream
+                .text(url.as_str(), Request::default())
+                .await
+                .map_err(|error| format!("Kodik · страница плеера. {error}"))?;
             let data: Value = serde_json::from_str(
                 &upstream
                     .text(
@@ -302,7 +362,8 @@ pub async fn resolve(candidate: &Candidate, upstream: &impl Upstream) -> Result<
                             Some(kodik_fields(&html)?),
                         )?,
                     )
-                    .await?,
+                    .await
+                    .map_err(|error| format!("Kodik · список потоков. {error}"))?,
             )
             .map_err(|_| "Некорректный ответ Kodik.")?;
             let mut streams = Vec::new();
@@ -425,6 +486,8 @@ pub async fn resolve(candidate: &Candidate, upstream: &impl Upstream) -> Result<
             )
             .map_err(|_| "Некорректный ответ CVH.")?;
             let mut streams = Vec::new();
+            #[cfg(desktop)]
+            let mut download_mp4 = Vec::new();
             for (key, quality) in [
                 ("mpegTinyUrl", 144),
                 ("mpegLowestUrl", 240),
@@ -438,6 +501,10 @@ pub async fn resolve(candidate: &Candidate, upstream: &impl Upstream) -> Result<
                     {
                         streams
                             .push(json!({"quality":quality,"url":https_media(hls)?,"type":"hls"}));
+                        #[cfg(desktop)]
+                        if let Ok(url) = https_media(raw) {
+                            download_mp4.push(json!({"quality":quality,"url":url,"type":"mp4"}));
+                        }
                     } else {
                         streams.push(
                             json!({"quality": quality,"url": https_media(raw)?,"type":"mp4"}),
@@ -445,6 +512,13 @@ pub async fn resolve(candidate: &Candidate, upstream: &impl Upstream) -> Result<
                     }
                 }
             }
+            #[cfg(desktop)]
+            {
+                let mut data = data;
+                data["downloadMp4"] = json!(download_mp4);
+                ("CVH", data, String::new(), streams)
+            }
+            #[cfg(not(desktop))]
             ("CVH", data, String::new(), streams)
         }
         _ => return Err("Для Alloha нужна сессия ретрансляции.".into()),
@@ -452,9 +526,14 @@ pub async fn resolve(candidate: &Candidate, upstream: &impl Upstream) -> Result<
     if streams.is_empty() {
         return Err("Источник не предоставил видео.".into());
     }
-    Ok(
-        json!({"provider":provider,"duration":data["duration"].as_f64().unwrap_or(0.0),"videoId":candidate.video_id,"streams":streams,"skips":provider_skips(&data, &html)}),
-    )
+    let result = json!({"provider":provider,"duration":data["duration"].as_f64().unwrap_or(0.0),"videoId":candidate.video_id,"streams":streams,"skips":provider_skips(&data, &html)});
+    #[cfg(desktop)]
+    if let Some(reserves) = data["downloadMp4"].as_array().filter(|_| provider == "CVH") {
+        let mut result = result;
+        result["downloadMp4"] = json!(reserves);
+        return Ok(result);
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -462,6 +541,41 @@ pub mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD;
     use std::{collections::VecDeque, sync::Mutex};
+
+    #[test]
+    fn recognizes_aksor_media_hosts() {
+        for url in [
+            "https://old.tut-video.net/a.mpd",
+            "https://cdn10.takehost-cdn.aksor.tv/a.mpd",
+        ] {
+            assert!(is_aksor_media_url(&Url::parse(url).unwrap()));
+        }
+        for url in [
+            "http://old.tut-video.net/a.mpd",
+            "https://old.tut-video.net:8080/a.mpd",
+            "https://user@old.tut-video.net/a.mpd",
+            "https://old.tut-video.net.example.org/a.mpd",
+            "https://anotheraksor.tv/a.mpd",
+        ] {
+            assert!(!is_aksor_media_url(&Url::parse(url).unwrap()));
+        }
+    }
+
+    #[test]
+    fn retries_transport_and_access_failures_but_does_not_retry_missing_content() {
+        for error in [
+            "Kodik · страница плеера. Источник вернул HTTP 500.",
+            "Alloha · Источник вернул HTTP 403.",
+            "CVH · Источник вернул HTTP 451.",
+            "Aksor · видеопоток недоступен (HTTP 503).",
+            "Aksor · список потоков. Нет связи с источником.",
+            "Источник не ответил вовремя.",
+        ] {
+            assert!(should_retry_with_proxy(error), "{error}");
+        }
+        assert!(!should_retry_with_proxy("Источник вернул HTTP 404."));
+        assert!(!should_retry_with_proxy("Некорректный ответ Kodik."));
+    }
 
     #[test]
     fn recognizes_the_actual_jam_cdn_studio_alias() {

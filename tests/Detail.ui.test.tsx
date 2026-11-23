@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { chooseOption } from './dropdown-actions';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { Detail } from '~/components/Detail';
+import { InterfaceEffects } from '~/components/InterfaceEffects';
 import { clearSession, saveSession } from '~/lib/session';
 import { resolveStream } from '~/lib/streams';
 import { savePlaybackSettings } from '~/lib/playback-settings';
@@ -177,7 +177,7 @@ describe('anime media center screens', () => {
     const { container } = render(<Detail id="10531" />);
 
     await screen.findByText('Описание аниме');
-    await screen.findByRole('region', { name: 'Доступные озвучки' });
+    const episodes = await screen.findByRole('region', { name: 'Серии и озвучки' });
     expect(container.querySelector('.room-main')?.firstElementChild?.className).toBe(
       'anime-watch-heading overview-heading'
     );
@@ -187,7 +187,8 @@ describe('anime media center screens', () => {
     await screen.findByRole('img', { name: /Распределение 4 оценок/ });
     expect(screen.getByRole('button', { name: 'Открыть скриншот 1' })).toBeTruthy();
 
-    const voice = await screen.findByRole('link', { name: /AniDub/ });
+    fireEvent.click(await within(episodes).findByRole('button', { name: 'AniDub' }));
+    const voice = within(episodes).getByRole('link', { name: 'Серия 1' });
 
     expect(voice.getAttribute('data-app-href')).toContain('voice=AniDub');
     expect(screen.getByRole('heading', { name: 'Порядок просмотра' })).toBeTruthy();
@@ -199,7 +200,14 @@ describe('anime media center screens', () => {
   it('opens episodes from the anime page without resolving streams, and links to the chosen episode and voice', async () => {
     vi.mocked(resolveStream).mockClear();
 
-    const { container } = render(<Detail id="10531" />);
+    const { container } = render(
+      <>
+        <InterfaceEffects onBack={() => {}} />
+        <main id="main">
+          <Detail id="10531" />
+        </main>
+      </>
+    );
 
     fireEvent.click(await screen.findByRole('button', { name: 'Серии' }));
 
@@ -217,18 +225,17 @@ describe('anime media center screens', () => {
     fireEvent.input(within(panel).getByRole('searchbox', { name: 'Найти серию' }), {
       target: { value: '' },
     });
-    const dubbing = within(panel).getByRole('combobox', { name: 'Озвучка серий' });
-    fireEvent.click(dubbing);
-    fireEvent.keyDown(dubbing, { key: 'Escape' });
-    expect(screen.getByRole('dialog', { name: 'Серии' })).toBe(panel);
-    expect(screen.queryByRole('listbox')).toBeNull();
-    chooseOption(dubbing, 'AniDub');
+    const dubbing = within(panel).getByRole('group', { name: 'Озвучка серий' });
+    fireEvent.click(within(dubbing).getByRole('button', { name: 'AniDub' }));
     expect(
       within(panel).getByRole('link', { name: 'Серия 1' }).getAttribute('data-app-href')
     ).toContain('voice=AniDub');
     expect(within(panel).queryByRole('link', { name: 'Серия 2' })).toBeNull();
+    expect(within(panel).getByText('Нет в этой озвучке')).toBeTruthy();
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: 'Серии' })).toBeNull();
+    const inline = screen.getByRole('region', { name: 'Серии и озвучки' });
+    expect(within(inline).getByRole('button', { name: 'AniDub', pressed: true })).toBeTruthy();
     fireEvent.keyDown(window, { key: 'e', code: 'KeyE' });
     expect(screen.getByRole('dialog', { name: 'Серии' })).toBeTruthy();
     fireEvent.keyDown(window, { key: 'c', code: 'KeyC' });
@@ -336,7 +343,7 @@ describe('anime media center screens', () => {
     expect(first.closest('.poster-artwork')?.classList.contains('is-loaded')).toBe(false);
     fireEvent.load(first);
     expect(first.closest('.poster-artwork')?.classList.contains('is-loaded')).toBe(true);
-    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'ArrowRight' });
     expect(screen.getByRole('dialog', { name: 'Скриншот 2 из 2' })).toBeTruthy();
 
     const second = screen.getByRole('img', { name: /Скриншот 2 —/ });
@@ -403,7 +410,14 @@ describe('anime media center screens', () => {
     expect(container.querySelector('.room-header')).toBeNull();
   });
   it('uses the same sidebars for comments, episodes and voices with global keyboard control', async () => {
-    const { container } = render(<Detail id="10531" query="view=watch" />);
+    const { container } = render(
+      <>
+        <InterfaceEffects onBack={() => {}} />
+        <main id="main">
+          <Detail id="10531" query="view=watch" />
+        </main>
+      </>
+    );
 
     await screen.findByRole('button', { name: 'Серии' });
 

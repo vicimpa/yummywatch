@@ -1460,12 +1460,12 @@
     bottom: calc(151px + env(safe-area-inset-bottom, 0px));
     font-size: 12px;
   }
-  html[data-keyboard='open'] .bottom-nav,
-  html[data-keyboard='open'] .anime-sections-nav,
-  html[data-keyboard='open'] .filter-button {
+  html:not([data-tv])[data-keyboard='open'] .bottom-nav,
+  html:not([data-tv])[data-keyboard='open'] .anime-sections-nav,
+  html:not([data-tv])[data-keyboard='open'] .filter-button {
     display: none;
   }
-  html[data-keyboard='open'] .mobile-sheet-footer {
+  html:not([data-tv])[data-keyboard='open'] .mobile-sheet-footer {
     padding-bottom: 13px;
   }
 }
@@ -2402,7 +2402,7 @@
   min-height: 44px;
   font-size: 16px;
   padding: 10px 12px;
-  background: #ffffff0a;
+  background: var(--menu-surface);
   border: 1px solid #ffffff26;
   border-radius: 8px;
   color: #f7f2f6;

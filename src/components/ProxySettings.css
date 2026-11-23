@@ -1,0 +1,101 @@
+.proxy-pool {
+  margin-top: 20px;
+}
+
+.proxy-pool-options,
+.proxy-pool-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
+  gap: 12px;
+}
+
+.proxy-pool .settings-choice {
+  margin: 0;
+}
+
+.proxy-pool-section {
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 14px;
+}
+
+.proxy-pool-section h3 {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.proxy-pool-section ul {
+  list-style: none;
+  margin: 7px 0 0;
+  padding: 0;
+}
+
+.proxy-pool-section li,
+.proxy-pool-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 14px;
+}
+
+.proxy-pool-section li {
+  min-height: 36px;
+  font-size: 12px;
+}
+
+.proxy-pool-section li + li {
+  border-top: 1px solid var(--line);
+}
+
+.proxy-pool-section li small,
+.proxy-pool-metrics dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.proxy-pool-metrics {
+  margin-block: 12px;
+}
+
+.proxy-pool-metrics > div {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.proxy-pool-metrics dd {
+  margin: 3px 0 0;
+  font-size: 19px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-card .proxy-pool-check > :is(.button, p) {
+  margin: 0;
+}
+
+.proxy-pool-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.proxy-pool-add label {
+  flex: 1 1 15rem;
+}
+
+.settings-card .proxy-pool-add > .button,
+.settings-card .proxy-pool-section li > .text-link {
+  margin: 0;
+}
+
+.proxy-pool-address {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding-block: 6px;
+  overflow-wrap: anywhere;
+}

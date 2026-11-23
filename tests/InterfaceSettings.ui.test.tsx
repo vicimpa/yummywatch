@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/preact';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { InterfaceEffects } from '~/components/InterfaceEffects';
 import { InterfaceSettingsCard } from '~/components/InterfaceSettings';
+import { ProxySettingsCard } from '~/components/ProxySettings';
 import { interfaceSettings, saveInterfaceSettings } from '~/lib/interface-settings';
+import type { ProxyPoolReport } from '~/lib/proxy-settings';
 
 beforeEach(() => {
   localStorage.clear();
@@ -14,12 +16,121 @@ afterEach(() => {
   vi.unstubAllGlobals();
   delete document.documentElement.dataset.motion;
   delete document.documentElement.dataset.interfaceStyle;
+  delete document.documentElement.dataset.tv;
 });
 describe('media center preferences and sound', () => {
+  it('turns off the native proxy pool and reads the saved value when settings reopen', async () => {
+    let enabled = true;
+    const invoke = vi.fn(async (_command: string, args: { enabled?: boolean }) => {
+      if (args.enabled !== undefined) enabled = args.enabled;
+      return enabled;
+    });
+    vi.stubGlobal('isTauri', true);
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+    const view = render(<ProxySettingsCard />);
+    const toggle = () =>
+      screen.getByRole<HTMLInputElement>('checkbox', {
+        name: 'Использовать прокси для источников видео',
+      });
+    await waitFor(() => expect(toggle().checked).toBe(true));
+    fireEvent.click(toggle());
+    await waitFor(() => expect(toggle().checked).toBe(false));
+    expect(invoke).toHaveBeenCalledWith('proxy_settings', { enabled: false }, undefined);
+    view.unmount();
+    render(<ProxySettingsCard />);
+    await waitFor(() => expect(toggle().disabled).toBe(false));
+    expect(toggle().checked).toBe(false);
+  });
+
+  it('saves the selected feeds and displays the actual reading and playback counters', async () => {
+    const report: ProxyPoolReport = {
+      preferences: { intervalSeconds: 4, concurrentChecks: 4, feeds: [true, true] },
+      customProxies: [],
+      feeds: [
+        ['ProxMint', { addresses: 12, updatedAt: 1700000000, error: null }],
+        ['ProxyFly', { addresses: 23, updatedAt: 1700000000, error: null }],
+      ],
+      working: 3,
+      queued: 20,
+      probes: { checked: 12, passed: 3, completedAt: 1700000000 },
+      manualPending: false,
+      lastManual: null,
+      players: [
+        ['Kodik', 5, 2, 1700000000],
+        ['Alloha', 0, 0, null],
+      ],
+    };
+    const invoke = vi.fn(async (command, args) => {
+      if (command === 'proxy_settings') return true;
+      if (command === 'edit_custom_proxy')
+        report.customProxies =
+          args.change.action === 'add'
+            ? [{ id: 17, address: 'http://192.168.1.7:3128', authenticated: true, reachable: null }]
+            : [];
+      if (args.preferences) report.preferences = args.preferences;
+      if (args.checkNow) report.lastManual = { checked: 4, passed: 1, completedAt: 1700000000 };
+      return { ...report };
+    });
+    vi.stubGlobal('isTauri', true);
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+    render(<ProxySettingsCard />);
+
+    const feed = await screen.findByRole<HTMLInputElement>('checkbox', { name: 'ProxyFly' });
+    fireEvent.click(feed);
+    await waitFor(() => expect(feed.checked).toBe(false));
+    expect(invoke).toHaveBeenCalledWith(
+      'proxy_pool_report',
+      { preferences: { intervalSeconds: 4, concurrentChecks: 4, feeds: [true, false] } },
+      undefined
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить сейчас' }));
+    expect(await screen.findByText(/прошли 1 из 4/)).toBeTruthy();
+    expect(screen.getByText(/2 из 5 успешно/)).toBeTruthy();
+    expect(screen.getByText('Попыток пока не было')).toBeTruthy();
+
+    const address = screen.getByRole<HTMLInputElement>('textbox', { name: 'Адрес прокси' });
+    const custom = 'http://user:secret@192.168.1.7:3128';
+    fireEvent.input(address, { target: { value: custom } });
+    fireEvent.submit(address.form!);
+    expect(await screen.findByText('http://192.168.1.7:3128')).toBeTruthy();
+    expect(invoke).toHaveBeenCalledWith(
+      'edit_custom_proxy',
+      { change: { action: 'add', address: custom } },
+      undefined
+    );
+    await waitFor(() => expect(address.value).toBe(''));
+    expect(screen.getByText('С авторизацией · Ожидает проверки')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Удалить прокси http://192.168.1.7:3128' }));
+    await waitFor(() => expect(screen.queryByText('http://192.168.1.7:3128')).toBeNull());
+  });
+
+  it('disables transitions on TV even when animations are saved as enabled', () => {
+    saveInterfaceSettings({ animations: true });
+    document.documentElement.dataset.tv = 'true';
+    render(
+      <>
+        <InterfaceEffects onBack={() => {}} />
+        <InterfaceSettingsCard />
+      </>
+    );
+
+    const animations = screen.getByRole<HTMLInputElement>('checkbox', {
+      name: 'Анимации переходов и боковых панелей',
+    });
+    expect(animations.disabled).toBe(true);
+    expect(animations.checked).toBe(false);
+    expect(document.documentElement.dataset.motion).toBe('off');
+    expect(interfaceSettings().sounds).toBe(false);
+
+    saveInterfaceSettings({ volume: 0.5 });
+    delete document.documentElement.dataset.tv;
+    expect(interfaceSettings().animations).toBe(true);
+  });
+
   it('persists master volume, effects volume, animation and appearance and applies master volume to video', () => {
     render(
       <>
-        <InterfaceEffects onBack={() => {}} watching={false} />
+        <InterfaceEffects onBack={() => {}} />
         <video />
         <InterfaceSettingsCard />
       </>
@@ -80,7 +191,7 @@ describe('media center preferences and sound', () => {
     );
     render(
       <>
-        <InterfaceEffects onBack={() => {}} watching={false} />
+        <InterfaceEffects onBack={() => {}} />
         <button>Первый</button>
         <button>Второй</button>
       </>
@@ -112,7 +223,7 @@ describe('media center preferences and sound', () => {
 
     render(
       <>
-        <InterfaceEffects onBack={back} watching={false} />
+        <InterfaceEffects onBack={back} />
         <input aria-label="Поле" />
         <aside data-sidebar-open="true">
           <button>Закрыть</button>
@@ -139,7 +250,7 @@ describe('media center preferences and sound', () => {
     Object.defineProperty(document, elementKey, { configurable: true, get: () => fullscreen });
     Object.defineProperty(document, exitKey, { configurable: true, value: exit });
     try {
-      render(<InterfaceEffects onBack={back} watching />);
+      render(<InterfaceEffects onBack={back} />);
       fireEvent.keyDown(document.body, { key: 'Escape' });
       expect(exit).toHaveBeenCalledOnce();
       expect(back).not.toHaveBeenCalled();
@@ -186,7 +297,7 @@ describe('media center preferences and sound', () => {
     );
     render(
       <>
-        <InterfaceEffects onBack={() => {}} watching />
+        <InterfaceEffects onBack={() => {}} />
         <div class="video-controls">
           <button class="video-hit-area" aria-label="Поверхность видео" />
           <div class="video-toolbar">

@@ -1,4 +1,5 @@
 import { AppLink } from '~/ui/AppLink';
+import { isTvMode } from '~/lib/tv-mode';
 import type { FunctionalComponent as FC, JSX } from 'preact';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
@@ -53,7 +54,7 @@ export const Search: FC<TSearchProps> = ({ query, active = true }) => {
   }, [query]);
 
   useLayoutEffect(() => {
-    if (active && !text) input.current?.focus({ preventScroll: true });
+    if (active && !text && !isTvMode()) input.current?.focus({ preventScroll: true });
   }, [active]);
 
   useEffect(() => {

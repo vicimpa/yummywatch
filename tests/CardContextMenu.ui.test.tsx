@@ -94,6 +94,19 @@ it('opens with Shift+F10, navigates by arrows and returns focus on Escape', asyn
   expect(document.activeElement).toBe(source);
 });
 
+it('returns from the list submenu to its trigger before closing the card menu', async () => {
+  mount();
+  open();
+  const menu = await screen.findByRole('menu');
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Изменить список…' }));
+  expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Назад' }));
+  fireEvent(menu, new Event('yumiwatch:tv-dismiss'));
+  expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Изменить список…' }));
+  fireEvent(menu, new Event('yumiwatch:tv-dismiss'));
+  expect(screen.queryByRole('menu')).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: anime.title }));
+});
+
 it('dismisses on outside interaction and prevents the generic WebView context menu', async () => {
   render(
     <>

@@ -1,5 +1,6 @@
 import type { RefObject } from 'preact';
 
+import type { StoredPlayback } from '~/lib/downloads';
 import type { PlaybackMedia } from '~/lib/playback-media';
 import type { PictureInPictureControls } from '~/lib/native-playback';
 import type { PlaybackReport } from '~/lib/playback-session';
@@ -11,6 +12,7 @@ export type TPlayerProps = {
   presentation?: 'immersive';
   modeOverride?: 'source' | 'universal';
   onBack?: () => void;
+  backLabel?: string;
   panel?: MediaPanel;
   onPanelChange?: (panel: MediaPanel) => void;
   onComments?: () => void;
@@ -21,6 +23,7 @@ export type TPlayerProps = {
   preferredVoice?: string;
   preferredEpisode?: string;
   startPlaying?: boolean;
+  newWatch?: boolean;
   onSelectPlayer?: (
     video: Video,
     mode: 'source' | 'universal',
@@ -28,6 +31,7 @@ export type TPlayerProps = {
     duration: number
   ) => void;
   anime: Anime;
+  offline?: StoredPlayback;
   history?: WatchEntry;
   onCheckpoint?: (entry: WatchEntry) => void;
   onPlayback?: (event: PlaybackReport) => void;

@@ -5,6 +5,8 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+#[cfg(desktop)]
+use tauri::http::HeaderMap;
 use tauri::http::{header, Method, Request, Response, StatusCode};
 use tokio::sync::{Mutex, Semaphore};
 
@@ -13,12 +15,97 @@ use crate::{
     providers::{self, Candidate},
 };
 
+#[path = "proxy_pool.rs"]
+mod proxy_pool;
+pub(crate) use proxy_pool::{CustomProxyChange, PoolPreferences, PoolReport};
+
+#[cfg(desktop)]
+pub fn download_format(kind: &str) -> u8 {
+    match kind {
+        "hls" => 3,
+        "dash" => 2,
+        "mp4" => 1,
+        _ => 0,
+    }
+}
+
 type Cache = Arc<Mutex<HashMap<String, (Instant, Value)>>>;
 type SourceResolution = tokio::sync::OnceCell<Result<Resolved, String>>;
 type SourceCache = Arc<Mutex<HashMap<Candidate, (Instant, Arc<SourceResolution>)>>>;
 const SOURCE_PRIORITY_WINDOW: Duration = Duration::from_secs(2);
 const RESOLUTION_TTL: Duration = Duration::from_secs(30);
+const AKSOR_MANIFEST_PREFIX: usize = 4096;
 type ReserveRank = (bool, bool, bool, u64, usize);
+
+fn is_dash_manifest_prefix(bytes: &[u8]) -> bool {
+    use quick_xml::{events::Event, Reader};
+
+    let mut xml = Reader::from_reader(bytes);
+    xml.config_mut().trim_text(true);
+    loop {
+        match xml.read_event() {
+            Ok(Event::Start(root) | Event::Empty(root)) => {
+                return root.local_name().as_ref() == "MPD";
+            }
+            Ok(Event::Decl(_) | Event::PI(_) | Event::Comment(_) | Event::DocType(_)) => {}
+            _ => return false,
+        }
+    }
+}
+
+async fn aksor_stream_error(client: &Client, mut url: url::Url, dash: bool) -> Option<String> {
+    for _ in 0..4 {
+        let request = client
+            .request(if dash { Method::GET } else { Method::HEAD }, url.clone())
+            .header(header::REFERER, providers::AKSOR_MEDIA_REFERER);
+        let mut response = if dash {
+            providers::send_with_server_retry(request).await.ok()?
+        } else {
+            request.send().await.ok()?
+        };
+        let status = response.status();
+        if status.is_redirection() {
+            let target = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|raw| url.join(raw).ok());
+            let Some(target) = target else {
+                return Some("Aksor вернул неизвестный адрес видеопотока.".into());
+            };
+            if !providers::is_aksor_media_url(&target) {
+                return None;
+            }
+            url = target;
+            continue;
+        }
+        if matches!(status.as_u16(), 404 | 410) || (dash && !status.is_success()) {
+            return Some(format!(
+                "Aksor · видеопоток недоступен (HTTP {}).",
+                status.as_u16()
+            ));
+        }
+        if !dash {
+            return None;
+        }
+        let mut prefix = Vec::new();
+        while let Some(chunk) = response.chunk().await.ok()? {
+            let remaining = AKSOR_MANIFEST_PREFIX - prefix.len();
+            prefix.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            if is_dash_manifest_prefix(&prefix) {
+                return None;
+            }
+            if prefix.len() == AKSOR_MANIFEST_PREFIX {
+                break;
+            }
+        }
+        return Some(format!(
+            "Aksor · нет манифеста DASH (HTTP {}).",
+            status.as_u16()
+        ));
+    }
+    Some("Aksor · слишком много перенаправлений.".into())
+}
 
 #[derive(Clone)]
 enum Resolved {
@@ -73,6 +160,13 @@ impl Resolved {
             Self::Direct(value) if value["provider"] == "CVH" => {
                 backend.media.register(value).await
             }
+            #[cfg(desktop)]
+            Self::Direct(value)
+                if matches!(value["provider"].as_str(), Some("Kodik" | "Aksor"))
+                    && backend.downloads.is_some() =>
+            {
+                backend.media.register(value).await
+            }
             Self::Direct(value) => Ok(value),
         }
     }
@@ -86,7 +180,16 @@ pub struct Backend {
     cache: Cache,
     sources: SourceCache,
     transfers: Arc<Semaphore>,
+    proxies: proxy_pool::Pool,
+    #[cfg(desktop)]
+    background: Arc<Semaphore>,
+    #[cfg(desktop)]
+    background_only: bool,
     media: crate::media::Media,
+    #[cfg(desktop)]
+    pub downloads: Option<crate::downloads::Store>,
+    #[cfg(all(test, desktop))]
+    pub fixture: Option<crate::downloads::tests::Fixture>,
 }
 
 impl Backend {
@@ -100,9 +203,65 @@ impl Backend {
             sessions: Arc::default(),
             cache: Arc::default(),
             sources: Arc::default(),
-            transfers: Arc::new(Semaphore::new(4)),
+            transfers: Arc::new(Semaphore::new(8)),
+            proxies: proxy_pool::Pool::new(None),
+            #[cfg(desktop)]
+            background: Arc::new(Semaphore::new(5)),
+            #[cfg(desktop)]
+            background_only: false,
             media: crate::media::Media::default(),
+            #[cfg(desktop)]
+            downloads: None,
+            #[cfg(all(test, desktop))]
+            fixture: None,
         })
+    }
+
+    pub fn with_proxy_settings(mut self, file: std::path::PathBuf) -> Self {
+        self.proxies = proxy_pool::Pool::new(Some(file));
+        self
+    }
+
+    pub fn proxy_settings(&self, enabled: Option<bool>) -> Result<bool, String> {
+        self.proxies.settings(enabled)
+    }
+
+    pub(crate) fn proxy_pool_report(
+        &self,
+        preferences: Option<PoolPreferences>,
+        check_now: bool,
+    ) -> Result<PoolReport, String> {
+        self.proxies.report(preferences, check_now)
+    }
+
+    pub(crate) fn edit_custom_proxy(
+        &self,
+        change: CustomProxyChange,
+    ) -> Result<PoolReport, String> {
+        self.proxies.edit_custom(change)?;
+        self.proxies.report(None, false)
+    }
+
+    pub fn start_proxy_checks(&self) {
+        self.proxies.start(self.client.clone());
+    }
+
+    #[cfg(any(desktop, target_os = "android"))]
+    pub async fn aksor_hls(&self, url: url::Url) -> Result<String, String> {
+        match self
+            .media
+            .aksor_hls(self.client.clone(), url.clone(), false)
+            .await
+        {
+            Err(error) if providers::should_retry_with_proxy(&error) => {
+                self.proxies
+                    .retry("aksor", error, |client| {
+                        self.media.aksor_hls(client, url.clone(), true)
+                    })
+                    .await
+            }
+            result => result,
+        }
     }
 
     pub async fn resolve(&self, candidates: Vec<Candidate>) -> Result<Value, String> {
@@ -189,23 +348,33 @@ impl Backend {
         };
         let result = resolution
             .get_or_init(|| async {
-                tokio::time::timeout(Duration::from_secs(20), async {
-                    let (url, family) = providers::provider_url(&candidate.url)?;
-                    if family == "alloha" {
-                        return Ok(Resolved::Alloha(
-                            alloha::prepare(&url, &candidate, &self.client).await?,
-                        ));
+                let (url, family) = providers::provider_url(&candidate.url)?;
+                let provider = match family {
+                    "aksor" => "Aksor",
+                    "kodik" => "Kodik",
+                    "alloha" => "Alloha",
+                    _ => "CVH",
+                };
+                let resolve = |client| Self::resolve_source(&candidate, &url, family, client);
+                let timeout = Duration::from_secs(if self.proxies.enabled() { 10 } else { 20 });
+                let direct = tokio::time::timeout(timeout, resolve(self.client.clone()))
+                    .await
+                    .unwrap_or_else(|_| Err("Источник не ответил вовремя.".into()))
+                    .map_err(|error| {
+                        if providers::should_retry_with_proxy(&error)
+                            && !error.starts_with(provider)
+                        {
+                            format!("{provider} · {error}")
+                        } else {
+                            error
+                        }
+                    });
+                match direct {
+                    Err(error) if providers::should_retry_with_proxy(&error) => {
+                        self.proxies.retry(family, error, resolve).await
                     }
-                    let value = providers::resolve(&candidate, &self.client).await?;
-                    let value = if family == "aksor" {
-                        self.available_aksor_streams(value).await?
-                    } else {
-                        value
-                    };
-                    Ok(Resolved::Direct(value))
-                })
-                .await
-                .unwrap_or_else(|_| Err("Источник не ответил вовремя.".to_string()))
+                    result => result,
+                }
             })
             .await;
         if result.is_err() {
@@ -218,6 +387,26 @@ impl Backend {
             }
         }
         result.clone()
+    }
+
+    async fn resolve_source(
+        candidate: &Candidate,
+        url: &url::Url,
+        family: &str,
+        client: Client,
+    ) -> Result<Resolved, String> {
+        if family == "alloha" {
+            return Ok(Resolved::Alloha(
+                alloha::prepare(url, candidate, &client).await?,
+            ));
+        }
+        let value = providers::resolve(candidate, &client).await?;
+        let value = if family == "aksor" {
+            Self::available_aksor_streams(value, &client).await?
+        } else {
+            value
+        };
+        Ok(Resolved::Direct(value))
     }
 
     pub async fn inspect_qualities(&self, candidates: Vec<Candidate>) -> Result<Vec<u32>, String> {
@@ -248,7 +437,7 @@ impl Backend {
         Ok(qualities.into_iter().collect())
     }
 
-    async fn available_aksor_streams(&self, mut result: Value) -> Result<Value, String> {
+    async fn available_aksor_streams(mut result: Value, client: &Client) -> Result<Value, String> {
         let mut probes = tokio::task::JoinSet::new();
         let mut seen = std::collections::HashSet::new();
         for stream in result["streams"].as_array().ok_or("Нет потоков Aksor.")? {
@@ -258,43 +447,241 @@ impl Backend {
             let Ok(url) = url::Url::parse(raw) else {
                 continue;
             };
-            if !url
-                .host_str()
-                .is_some_and(|host| host.ends_with(".aksor.tv"))
-                || !seen.insert(raw.to_owned())
-            {
+            if !providers::is_aksor_media_url(&url) || !seen.insert(raw.to_owned()) {
                 continue;
             }
-            let client = self.client.clone();
+            let client = client.clone();
             let raw = raw.to_owned();
+            let dash = stream["type"] == "dash";
             probes.spawn(async move {
-                let missing = client
-                    .head(&raw)
-                    .timeout(Duration::from_secs(2))
-                    .send()
-                    .await
-                    .is_ok_and(|response| matches!(response.status().as_u16(), 404 | 410));
-                (raw, missing)
+                let error = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    aksor_stream_error(&client, url, dash),
+                )
+                .await
+                .ok()
+                .flatten();
+                (raw, error)
             });
         }
-        let mut missing = std::collections::HashSet::new();
+        let mut unavailable = HashMap::new();
         while let Some(probe) = probes.join_next().await {
-            if let Ok((url, true)) = probe {
-                missing.insert(url);
+            if let Ok((url, Some(error))) = probe {
+                unavailable.insert(url, error);
             }
         }
         let streams = result["streams"]
             .as_array_mut()
             .ok_or("Нет потоков Aksor.")?;
+        let error = streams
+            .iter()
+            .find_map(|stream| unavailable.get(stream["url"].as_str()?).cloned());
         streams.retain(|stream| {
             !stream["url"]
                 .as_str()
-                .is_some_and(|url| missing.contains(url))
+                .is_some_and(|url| unavailable.contains_key(url))
         });
         if streams.is_empty() {
-            return Err("Aksor удалил видеопоток (HTTP 404/410).".into());
+            return Err(error.unwrap_or_else(|| "Нет потоков Aksor.".into()));
         }
         Ok(result)
+    }
+
+    #[cfg(desktop)]
+    pub fn with_downloads(mut self, downloads: crate::downloads::Store) -> Self {
+        self.downloads = Some(downloads);
+        self
+    }
+
+    #[cfg(desktop)]
+    pub async fn resolve_download(
+        &self,
+        candidates: &[Candidate],
+        quality: u32,
+    ) -> Result<Value, String> {
+        Self::validate_candidates(candidates)?;
+        let mut reserves = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        let mut last_error = format!("В выбранной озвучке нет качества {quality}p или ниже.");
+        for candidate in candidates {
+            match tokio::time::timeout_at(deadline, self.prepare_source(candidate.clone())).await {
+                Ok(Ok(source)) => {
+                    let provider = source.result()["provider"].as_str().unwrap_or_default();
+                    let variant = source
+                        .streams()
+                        .filter_map(|stream| {
+                            let height = u32::try_from(stream["quality"].as_u64()?).ok()?;
+                            let format = download_format(stream["type"].as_str()?);
+                            let supported = !matches!(provider, "Kodik" | "Aksor")
+                                || stream["url"].as_str().is_some_and(|raw| {
+                                    crate::media::direct_media_supported(provider, raw)
+                                });
+                            (supported && format > 0 && height <= quality)
+                                .then_some((height, format))
+                        })
+                        .max();
+                    if let Some(rank) = variant {
+                        if rank == (quality, download_format("hls")) {
+                            match source.finish(self).await {
+                                Ok(result) => return Ok(result),
+                                Err(reason) => last_error = reason,
+                            }
+                        } else {
+                            reserves.push((rank, source));
+                        }
+                    }
+                }
+                Ok(Err(reason)) => last_error = reason,
+                Err(_) => break,
+            }
+        }
+        reserves.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+        for (_, source) in reserves {
+            match source.finish(self).await {
+                Ok(result) => return Ok(result),
+                Err(reason) => last_error = reason,
+            }
+        }
+        Err(last_error)
+    }
+
+    #[cfg(desktop)]
+    pub async fn dash_manifest(
+        &self,
+        upstream: &str,
+        quality: u32,
+        text: &str,
+    ) -> Result<(String, Vec<(String, String)>), String> {
+        self.media.dash_manifest(upstream, quality, text).await
+    }
+
+    #[cfg(desktop)]
+    pub fn background_downloads(&self) -> Self {
+        let mut backend = self.clone();
+        backend.background_only = true;
+        backend
+    }
+
+    #[cfg(desktop)]
+    pub async fn download_resource_url(&self, path: &str) -> Option<String> {
+        #[cfg(test)]
+        if self.fixture.is_some() {
+            return Some(path.to_owned());
+        }
+        let (provider, ids) = path.strip_prefix('/')?.split_once('/')?;
+        let (session, resource) = ids.split_once('/')?;
+        match provider {
+            "media" => self.media.resource_url(session, resource).await,
+            "alloha" => alloha::resource_url(&self.sessions, session, resource).await,
+            _ => None,
+        }
+        .map(|url| url.to_string())
+    }
+
+    #[cfg(desktop)]
+    pub async fn forget_download_sources(&self, candidates: &[Candidate]) {
+        let mut sources = self.sources.lock().await;
+        for candidate in candidates {
+            sources.remove(candidate);
+        }
+    }
+
+    #[cfg(desktop)]
+    pub async fn download_upstream(
+        &self,
+        path: &str,
+        headers: HeaderMap,
+    ) -> Result<Response<Vec<u8>>, String> {
+        self.download_upstream_method(path, Method::GET, headers)
+            .await
+    }
+
+    #[cfg(desktop)]
+    pub async fn download_upstream_method(
+        &self,
+        path: &str,
+        method: Method,
+        headers: HeaderMap,
+    ) -> Result<Response<Vec<u8>>, String> {
+        #[cfg(test)]
+        if let Some(fixture) = &self.fixture {
+            return fixture.fetch(path, headers).await;
+        }
+        let (provider, ids) = path
+            .strip_prefix('/')
+            .and_then(|path| path.split_once('/'))
+            .ok_or("Неизвестный поток.")?;
+        let (session, resource) = ids.split_once('/').ok_or("Неизвестный поток.")?;
+        let _background = if self.background_only {
+            Some(
+                self.background
+                    .acquire()
+                    .await
+                    .map_err(|_| "Транспорт недоступен.")?,
+            )
+        } else {
+            None
+        };
+        let _permit = self
+            .transfers
+            .acquire()
+            .await
+            .map_err(|_| "Транспорт недоступен.")?;
+        match provider {
+            "media" => {
+                self.media
+                    .relay(
+                        &self.client,
+                        session,
+                        resource,
+                        method,
+                        headers,
+                        self.proxies.enabled(),
+                    )
+                    .await
+            }
+            "alloha" => {
+                alloha::relay(
+                    &self.client,
+                    &self.sessions,
+                    session,
+                    resource,
+                    method,
+                    headers,
+                )
+                .await
+            }
+            _ => Err("Неизвестный поток.".into()),
+        }
+    }
+
+    async fn saved_media(&self, request: &Request<Vec<u8>>) -> Option<Response<Vec<u8>>> {
+        #[cfg(desktop)]
+        {
+            let store = self.downloads.as_ref()?;
+            let (id, resource) = crate::downloads::route(request.uri().path())?;
+            if request.uri().query().is_some()
+                || !matches!(*request.method(), Method::GET | Method::HEAD)
+            {
+                return Some(error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed"));
+            }
+            Some(
+                store
+                    .serve(
+                        self,
+                        id,
+                        resource,
+                        request.method().clone(),
+                        request.headers(),
+                    )
+                    .await,
+            )
+        }
+        #[cfg(not(desktop))]
+        {
+            let _ = request;
+            None
+        }
     }
 
     /// Tauri/WebView intercepts this scheme in-process. It never reaches the network stack.
@@ -311,6 +698,8 @@ impl Backend {
                 .status(StatusCode::NO_CONTENT)
                 .body(Vec::new())
                 .unwrap()
+        } else if let Some(response) = self.saved_media(&request).await {
+            response
         } else {
             let ids: Vec<_> = request
                 .uri()
@@ -345,6 +734,8 @@ impl Backend {
                         ids[2],
                         request.method().clone(),
                         request.headers().clone(),
+                        #[cfg(any(desktop, target_os = "android"))]
+                        self.proxies.enabled(),
                     )
                     .await
             } else {
@@ -517,6 +908,16 @@ mod tests {
         )
     }
 
+    #[test]
+    fn identifies_dash_manifests_by_the_xml_root() {
+        assert!(is_dash_manifest_prefix(
+            b"\xef\xbb\xbf<?xml version=\"1.0\"?>\n<!-- CDN -->\n<mpd:MPD xmlns:mpd=\"urn:mpeg:dash:schema:mpd:2011\">"
+        ));
+        assert!(!is_dash_manifest_prefix(b"db817583f6e42996c87406dd"));
+        assert!(!is_dash_manifest_prefix(b"<html><MPD/></html>"));
+        assert!(!is_dash_manifest_prefix(b"<?xml version=\"1.0\"?><MP"));
+    }
+
     async fn pending_alloha() -> alloha::Pending {
         let url = Url::parse("https://alloha.yani.tv/?token=public").unwrap();
         let upstream = MockUpstream::new(vec![
@@ -686,6 +1087,46 @@ mod tests {
             vec![360, 480, 1080]
         );
         assert!(backend.sessions.lock().await.is_empty());
+    }
+
+    #[cfg(desktop)]
+    #[tokio::test]
+    async fn download_quality_uses_the_closest_lower_variant_and_prefers_hls_at_equal_quality() {
+        let backend = Backend::new().unwrap();
+        let kodik = candidate("https://kodik.info/seria/test", "Студия");
+        let aksor = candidate("https://player.aksor.tv/video/test", "Студия");
+        let sources = [
+            (
+                aksor.clone(),
+                json!({"provider":"Aksor","streams":[
+                {"type":"dash","quality":720,"url":"https://cdn.aksor.tv/720.mpd"},
+                {"type":"dash","quality":1440,"url":"https://cdn.aksor.tv/1440.mpd"}]}),
+            ),
+            (
+                kodik.clone(),
+                json!({"provider":"Kodik","streams":[
+                {"type":"hls","quality":720,"url":"https://cloud2.solodcdn.com/720.m3u8"},
+                {"type":"hls","quality":2160,"url":"https://cloud2.solodcdn.com/2160.m3u8"}]}),
+            ),
+        ];
+        {
+            let mut cache = backend.sources.lock().await;
+            for (candidate, value) in sources {
+                let resolution = Arc::new(SourceResolution::new());
+                assert!(resolution.set(Ok(Resolved::Direct(value))).is_ok());
+                cache.insert(candidate, (Instant::now(), resolution));
+            }
+        }
+        let variants = [aksor, kodik];
+        assert_eq!(
+            backend.resolve_download(&variants, 1080).await.unwrap()["provider"],
+            "Kodik"
+        );
+        assert_eq!(
+            backend.resolve_download(&variants, 1440).await.unwrap()["provider"],
+            "Aksor"
+        );
+        assert!(backend.resolve_download(&variants, 480).await.is_err());
     }
 
     #[tokio::test(start_paused = true)]

@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       include_mobile:
-        description: Build signed Android/iOS packages (requires signing secrets)
+        description: Also build signed Android mobile and iOS packages
         type: boolean
         default: false
 permissions:
@@ -38,6 +38,7 @@ jobs:
     with:
       release: true
       mobile: ${{ inputs.include_mobile || false }}
+      android_tv: true
     secrets: inherit
   publish:
     needs: builds

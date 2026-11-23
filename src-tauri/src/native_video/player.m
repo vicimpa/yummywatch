@@ -176,7 +176,7 @@ static void *gl_proc(void *context, const char *name) {
 
 @interface YWVideoSource : NSObject {
 @public
-    NSString *url, *kind;
+    NSString *url, *kind, *referrer;
 }
 @end
 
@@ -187,10 +187,11 @@ static BOOL uses_media_io(const char *url) {
     return url && strncmp(url, "yumiwatch://", sizeof("yumiwatch://") - 1) == 0;
 }
 
-static YWVideoSource *video_source(const char *url, const char *kind) {
+static YWVideoSource *video_source(const char *url, const char *kind, const char *referrer) {
     YWVideoSource *source = [YWVideoSource new];
     source->url = [NSString stringWithUTF8String:url];
     source->kind = [NSString stringWithUTF8String:kind];
+    if (referrer) source->referrer = [NSString stringWithUTF8String:referrer];
     return source;
 }
 
@@ -692,6 +693,7 @@ void yw_video_upscale(void *pointer, const char *scale, const char *shader,
 }
 
 static mpv_handle *create_player(const char *kind, BOOL internal_media, BOOL preview,
+                                const char *referrer,
                                 const char *scale, const char *shader, const char *sharpen,
                                 bool strong) {
     mpv_handle *player = mpv.create();
@@ -718,6 +720,7 @@ static mpv_handle *create_player(const char *kind, BOOL internal_media, BOOL pre
     for (size_t index = 0; index < sizeof(options) / sizeof(*options); index++) {
         if (mpv.set_option_string(player, options[index][0], options[index][1]) < 0) goto failure;
     }
+    if (referrer && mpv.set_option_string(player, "referrer", referrer) < 0) goto failure;
     // These options are absent from the bundled library, where scripts aren't compiled in.
     const char *scriptOptions[] = { "load-scripts", "ytdl", "load-stats-overlay", "load-osd-console", "osc" };
     for (size_t index = 0; index < sizeof(scriptOptions) / sizeof(*scriptOptions); index++) {
@@ -751,7 +754,8 @@ static int seek_video(mpv_handle *player, double seconds) {
 }
 
 void *yw_video_open(void *webview, const char *library, const char *url,
-                    const char *caption_url, const char *kind, double start, const YWMediaIO *media_io,
+                    const char *caption_url, const char *kind, const char *referrer,
+                    double start, const YWMediaIO *media_io,
                     const char *scale, const char *shader, const char *sharpen,
                     bool strong, const char **error) {
     NSView *web = (__bridge NSView *)webview;
@@ -770,7 +774,7 @@ void *yw_video_open(void *webview, const char *library, const char *url,
     }
     YWVideo *session = [YWVideo new];
     YWVideoLayer *layer = nil;
-    session->player = create_player(kind, internal_media, NO, scale, shader, sharpen, strong);
+    session->player = create_player(kind, internal_media, NO, referrer, scale, shader, sharpen, strong);
     if (!session->player) goto failure;
 
     session->surface = [YWVideoLayer new];
@@ -808,7 +812,7 @@ void *yw_video_open(void *webview, const char *library, const char *url,
     mpv.render_context_set_update_callback(layer->renderer, update_render, (__bridge void *)layer);
 
     if (caption_url) session->caption = [NSString stringWithUTF8String:caption_url];
-    session->source = video_source(url, kind);
+    session->source = video_source(url, kind, referrer);
     if (load_video(session->player, url, start) < 0) goto failure;
     return (__bridge_retained void *)session;
 failure:
@@ -827,9 +831,10 @@ void yw_video_close(void *pointer) {
     CFRelease(pointer);
 }
 
-void yw_video_set_thumbnail_source(void *pointer, const char *url, const char *kind) {
+void yw_video_set_thumbnail_source(void *pointer, const char *url, const char *kind,
+                                  const char *referrer) {
     YWVideo *session = (__bridge YWVideo *)pointer;
-    session->previewSource = video_source(url, kind);
+    session->previewSource = video_source(url, kind, referrer);
 }
 
 static Node map_value(Node map, const char *key) {
@@ -977,7 +982,7 @@ void yw_video_frame(void *pointer, void *context,
     BOOL opening = !player;
     if (opening) {
         player = create_player(source->kind.UTF8String, uses_media_io(source->url.UTF8String),
-                               YES, NULL, NULL, NULL, false);
+                               YES, source->referrer.UTF8String, NULL, NULL, NULL, false);
         if (!player || load_video(player, source->url.UTF8String, seconds) < 0) return nil;
     } else {
         while (mpv.wait_event(player, 0)->id) {}

@@ -31,6 +31,7 @@ export const FavoriteButton: FC<TFavoriteButtonProps> = ({ anime, compact = fals
   return (
     <button
       class={`${compact ? 'save-button' : 'button secondary'} ${favorite ? 'saved' : ''}`}
+      data-tv-skip={compact || undefined}
       disabled={busy || library.loading}
       aria-busy={busy}
       aria-label={

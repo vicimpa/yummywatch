@@ -40,13 +40,19 @@ for (const engine of [chromium, webkit]) {
       video.dispatchEvent(new Event('playing'));
     });
     await mute.click();
+    await page.waitForTimeout(3200);
+    assert(
+      await page.locator('.video-controls.is-visible').count(),
+      'The toolbar stays visible while the pointer is over a control'
+    );
+    await page.mouse.move(200, 100);
     await page.waitForSelector('.video-controls.is-hidden', { state: 'attached', timeout: 6000 });
     assert.equal(
       await page.evaluate(() => document.activeElement?.closest('.video-bottom') !== null),
       false,
       'Hidden controls release pointer focus'
     );
-    await page.mouse.move(200, 100);
+    await page.mouse.move(205, 104);
     await page.waitForSelector('.video-controls.is-visible', { state: 'attached' });
     await page.getByRole('button', { name: 'Настройки плеера', exact: true }).click();
     await page.waitForTimeout(3200);
@@ -59,22 +65,34 @@ for (const engine of [chromium, webkit]) {
     for (const key of ['ArrowUp', 'ArrowDown']) {
       await page.mouse.move(key === 'ArrowUp' ? 230 : 240, 130);
       await page.waitForSelector('.video-controls.is-visible', { state: 'attached' });
-      await page.locator('.video-toolbar button').first().focus();
+      const play = page.locator('.video-toolbar button').first();
+      await play.waitFor({ state: 'visible' });
+      await play.focus();
+      await page.waitForFunction(() => !!document.activeElement?.closest('.video-toolbar'));
       await page.keyboard.press(key);
       assert(
         await page.evaluate(() => !!document.activeElement?.closest('.video-controls')),
         `${key} keeps focus in the player`
       );
+      assert.equal(
+        await page.evaluate(() => getComputedStyle(document.activeElement).outlineColor),
+        'rgb(255, 205, 189)',
+        `${key} shows the shared keyboard focus in the player`
+      );
+      await page.waitForTimeout(3200);
+      assert(
+        await page.locator('.video-controls.is-visible').count(),
+        'A keyboard-focused control stays visible'
+      );
+      await page.mouse.move(key === 'ArrowUp' ? 231 : 241, 131);
       await page.waitForSelector('.video-controls.is-hidden', { state: 'attached', timeout: 6000 });
       assert(
-        await page.evaluate(() => document.activeElement?.matches('.video-controls')),
-        'An idle keyboard target returns to the player surface'
+        await page.evaluate(() => !document.activeElement?.closest('.video-controls')),
+        'The mouse releases keyboard focus in the player'
       );
       assert(await page.evaluate(() => getSelection()?.isCollapsed), 'No stale player selection');
     }
-    console.log(
-      `${engine.name()}: pointer and arrow-key focus auto-hide; open settings remain visible`
-    );
+    console.log(`${engine.name()}: mouse auto-hide, keyboard focus and player settings OK`);
   } finally {
     await browser.close();
   }

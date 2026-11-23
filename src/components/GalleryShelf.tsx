@@ -1,6 +1,7 @@
 import type { ComponentChildren, FunctionalComponent as FC } from 'preact';
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 
+import { isTvMode } from '~/lib/tv-mode';
 import { Button, ButtonLink, Icon } from '~/ui';
 
 export type TGalleryShelfProps = {
@@ -9,6 +10,7 @@ export type TGalleryShelfProps = {
   children: ComponentChildren;
   count: number;
   subtitle?: string;
+  className?: string;
 };
 
 export const GalleryShelf: FC<TGalleryShelfProps> = ({
@@ -17,6 +19,7 @@ export const GalleryShelf: FC<TGalleryShelfProps> = ({
   children,
   count,
   subtitle,
+  className,
 }) => {
   const rail = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ start: true, end: true });
@@ -59,9 +62,10 @@ export const GalleryShelf: FC<TGalleryShelfProps> = ({
     (direction: number) =>
       rail.current?.scrollBy({
         left: direction * rail.current.clientWidth * 0.8,
-        behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-          ? 'instant'
-          : 'smooth',
+        behavior:
+          isTvMode() || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+            ? 'instant'
+            : 'smooth',
       }),
     []
   );
@@ -71,7 +75,11 @@ export const GalleryShelf: FC<TGalleryShelfProps> = ({
   const nextPage = useCallback(() => move(1), [move]);
 
   return (
-    <section class="section gallery-shelf" aria-label={title}>
+    <section
+      class={`section gallery-shelf${className ? ` ${className}` : ''}`}
+      aria-label={title}
+      data-tv-focus-group
+    >
       <div class="section-heading">
         <div>
           <h2>{title}</h2>

@@ -17,7 +17,7 @@ const titles = Array.from({ length: 10000 }, (_, index) => ({
 
 render(
   <div class="media-app">
-    <InterfaceEffects onBack={() => {}} watching={false} />
+    <InterfaceEffects onBack={() => {}} />
     <div class="media-workspace" style={{ paddingLeft: 0 }}>
       <main id="main" class="media-scroll" tabIndex={-1}>
         <div class="media-scroll-content">

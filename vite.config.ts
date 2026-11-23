@@ -9,6 +9,9 @@ export default defineConfig({
   resolve: { alias: sourceAlias },
   base: process.env.BASE_PATH || '/',
   clearScreen: false,
+  ...(process.env.TAURI_ENV_PLATFORM === 'android' && {
+    build: { target: 'chrome91', cssTarget: 'chrome91' },
+  }),
   server: {
     watch: { ignored: ['**/src-tauri/**'] },
     proxy: {

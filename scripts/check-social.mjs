@@ -51,7 +51,7 @@ for (const engine of [chromium, webkit]) {
       episodes: { aired: 1, count: 12 },
       anime_status: { title: 'Онгоинг', alias: 'ongoing' },
     };
-    await page.routeWebSocket(/wss:\/\/socket[123]\.yani\.tv\/socket/, ws => {
+    await page.routeWebSocket(/wss:\/\/socket[123]\.(?:yani\.tv|yummyani\.me)\/socket/, ws => {
       if (new URL(ws.url()).searchParams.has('token')) socket = ws;
       ws.onMessage(message => {
         const value = JSON.parse(String(message));
@@ -80,15 +80,22 @@ for (const engine of [chromium, webkit]) {
         await route.fulfill({ status: 404, body: '' });
       }
     });
-    await page.route('https://api.yani.tv/**', async route => {
+    await page.route(/^https:\/\/(?:api\.yani\.tv|(?:old|ru)\.yummyani\.me)\//, async route => {
       const request = route.request();
       const url = new URL(request.url());
-      const path = url.pathname;
+      const path = url.pathname.replace(/^\/api\//, '/');
       const method = request.method();
+      const headers = {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE',
+        'access-control-allow-headers': '*',
+      };
+      if (method === 'OPTIONS') return route.fulfill({ status: 204, headers });
       let response = [];
       if (messagesOffline && path === '/dialogs/8/messages' && method === 'GET') {
         return route.fulfill({
           status: 503,
+          headers,
           contentType: 'application/json',
           body: JSON.stringify({ error: true }),
         });
@@ -96,6 +103,7 @@ for (const engine of [chromium, webkit]) {
       if (profileOffline && ['/users/id8', '/users/8/lists'].includes(path)) {
         return route.fulfill({
           status: 503,
+          headers,
           contentType: 'application/json',
           body: JSON.stringify({ error: true }),
         });
@@ -180,7 +188,11 @@ for (const engine of [chromium, webkit]) {
         subscribed = method === 'PUT';
         response = true;
       } else if (path === '/profile/logout') response = true;
-      await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ response }) });
+      await route.fulfill({
+        headers,
+        contentType: 'application/json',
+        body: JSON.stringify({ response }),
+      });
     });
     await page.addInitScript(() => {
       localStorage.setItem(
@@ -394,6 +406,7 @@ for (const engine of [chromium, webkit]) {
     );
     assert.equal(await page.getByLabel('Текст сообщения').inputValue(), 'Сохранённый черновик');
     await page.getByRole('alert').waitFor();
+    socket = undefined;
     await page.reload();
     await page.locator('[data-message-id="4"]').waitFor({ state: 'attached' });
     assert.equal(
@@ -407,6 +420,10 @@ for (const engine of [chromium, webkit]) {
       location.hash = '/profile?tab=friends';
     });
     await page.locator('.profile-person').filter({ hasText: 'Друг' }).waitFor();
+    assert(socket, 'Authenticated socket reconnects after reload');
+    await page.evaluate(
+      () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    );
     socket.send(
       JSON.stringify({
         event: 'update-user',
@@ -415,29 +432,25 @@ for (const engine of [chromium, webkit]) {
       })
     );
     await page.getByText('Недавно в сети', { exact: true }).waitFor();
-    await page.evaluate(() => {
-      location.hash = '/users/id8?tab=collection';
-    });
-    await page
-      .locator(
-        '.profile-collection .anime-card a[href^="#/anime/9?"],.profile-collection a[href^="#/anime/9?"]'
-      )
-      .first()
-      .waitFor();
-    await page.locator('.profile-collection a[href^="#/anime/9?"]').first().click();
+    await page.locator('.profile-person').filter({ hasText: 'Друг' }).click();
+    await page.getByRole('link', { name: 'Открыть коллекцию', exact: true }).click();
+    const collectionUrl = url => url.hash === '#/users/id8?tab=collection';
+    await page.waitForURL(collectionUrl);
+    const collectionTitle = page
+      .locator('.profile-collection a[data-app-href^="#/anime/9?"]')
+      .last();
+    await collectionTitle.click();
+    await page.waitForURL(url => url.hash.startsWith('#/anime/9'));
     await page.getByRole('heading', { name: 'Проверочная история', exact: true }).first().waitFor();
     profileOffline = true;
-    await page
-      .getByRole('navigation', { name: 'История переходов' })
-      .getByRole('button', { name: 'Назад', exact: true })
-      .click();
-    await page.waitForURL('**/#/users/id8?tab=collection');
-    await page.locator('.profile-collection a[href^="#/anime/9?"]').first().waitFor();
+    await page.evaluate(() => history.back());
+    await page.waitForURL(collectionUrl, { timeout: 5000 }).catch(error => {
+      error.message += `\nAfter Back: ${page.url()}`;
+      throw error;
+    });
+    await collectionTitle.waitFor();
     await page.getByText('Сохранённая версия от', { exact: false }).waitFor();
-    await page
-      .getByRole('navigation', { name: 'История переходов' })
-      .getByRole('button', { name: 'Вперёд', exact: true })
-      .click();
+    await page.evaluate(() => history.forward());
     await page.waitForURL(url => url.hash.startsWith('#/anime/9'));
     profileOffline = false;
     await page.evaluate(() => {

@@ -1,6 +1,7 @@
 import type { FunctionalComponent as FC } from 'preact';
 import { useCallback, useMemo, useRef } from 'preact/hooks';
 
+import { isContinueHidden } from '~/lib/continue-cache';
 import { useSession } from '~/lib/hooks';
 import { readPlaybackRecovery } from '~/lib/playback-recovery';
 import { PLAYBACK_FLUSH, savePlaybackSettings, usePlaybackSettings } from '~/lib/playback-settings';
@@ -43,7 +44,11 @@ export const Player: FC<TPlayerProps> = ({
     handoff.current?.token === (session?.token || null) && handoff.current.mode === mode
       ? handoff.current.entry
       : undefined;
-  const entry = requested || latest.sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const entry =
+    requested ||
+    (!isContinueHidden(anime.anime_id)
+      ? latest.sort((a, b) => b.updatedAt - a.updatedAt)[0]
+      : undefined);
 
   const checkpoint = useCallback(
     (entry: WatchEntry) => {

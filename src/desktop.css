@@ -225,6 +225,8 @@ html[data-desktop='macos'][data-interface-style='contrast'] .gallery-feature {
 
 /* AppKit draws video behind the transparent WKWebView. Its overlays remain interactive. */
 html[data-desktop='macos'][data-native-video] body,
+html[data-mobile='android'][data-native-video],
+html[data-mobile='android'][data-native-video] body,
 html[data-native-video] .media-app .media-backdrop,
 html[data-native-video] .is-watching,
 html[data-native-video] .watch-sticky,

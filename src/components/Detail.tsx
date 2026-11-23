@@ -1,30 +1,49 @@
 import { animeSiteUrl } from '~/lib/content-links';
 import { AppLink } from '~/ui/AppLink';
 import type { FunctionalComponent as FC, RefObject } from 'preact';
-import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import { animeDetail, animeVideos, peekAnimeDetail, peekAnimeVideos } from '~/lib/api';
+import {
+  downloadable,
+  downloadAnimePath,
+  downloadError,
+  downloadHistory,
+  downloadPath,
+  downloads,
+  downloadsAvailable,
+  matchesDownloadHistory,
+  preferredReadyDownload,
+  storedPlayback,
+  useDownloads,
+} from '~/lib/downloads';
+import { isContinueHidden } from '~/lib/continue-cache';
 import { exitPlayerFullscreen } from '~/lib/desktop';
 import { useLibrary, useResource, useSession } from '~/lib/hooks';
+import { leavePlayback } from '~/lib/navigation';
 import type { PlaybackMedia } from '~/lib/playback-media';
 import {
   setPictureInPictureUnavailable,
   type PictureInPictureControls,
 } from '~/lib/native-playback';
 import { readPlaybackRecovery } from '~/lib/playback-recovery';
-import { formatTime, latestWatchEntry } from '~/lib/player';
+import { playbackSettings } from '~/lib/playback-settings';
+import { readJSON } from '~/lib/storage';
+import { canStartAnime, formatTime, groupKey, latestWatchEntry, resumeVideo } from '~/lib/player';
+import { preferredStreamQuality, voiceKey } from '~/lib/streams';
 import type { WatchEntry } from '~/lib/types';
 import { useAnimeDiscordContext } from '~/hooks/useAnimeDiscordContext';
 
 import { AnimeAbout } from './AnimeAbout';
 import { Comments } from './Comments';
+import { DownloadPicker } from './Downloads';
 import { FavoriteButton } from './FavoriteButton';
 import { AnimeListButton } from './Library';
 import { Player } from './Player';
 import { PictureInPictureButton } from './PictureInPictureButton';
 import { type MediaPanel } from './Player.types';
 import { Poster } from './Poster';
-import { Button, CachedNotice, ErrorState, Icon, Sidebar } from '~/ui';
+import { Button, ButtonLink, CachedNotice, Empty, ErrorState, Icon, Sidebar } from '~/ui';
 
 export type TDetailProps = {
   id: string;
@@ -44,31 +63,67 @@ export const Detail: FC<TDetailProps> = ({
   pip,
 }) => {
   const params = new URLSearchParams(query);
+  const watching = params.get('view') === 'watch' || params.has('watch');
+  const downloadId = watching ? params.get('download') || '' : '';
+  useDownloads(!!downloadId);
+  const queue = downloadId ? downloads.value : undefined;
+  const local = queue?.find(
+    entry =>
+      entry.id === downloadId &&
+      entry.animeId === Number(id) &&
+      entry.status === 'ready' &&
+      entry.stream
+  );
+  const localKey =
+    local &&
+    queue
+      ?.filter(entry => entry.animeId === local.animeId && entry.status === 'ready')
+      .map(entry => entry.id)
+      .join(',');
+  const offline = useMemo(
+    () => (local && queue ? storedPlayback(local, queue) : undefined),
+    [local?.id, localKey]
+  );
+  const localError =
+    downloadId && !offline && (downloadError.value || (queue ? 'Скачанная серия недоступна.' : ''));
   const library = useLibrary(),
     session = useSession();
   const resource = useResource(
-    signal => animeDetail(id, signal),
-    [id, params.get('view') || 'about', session?.token, session?.verified],
-    () => peekAnimeDetail(id)
+    signal =>
+      downloadId
+        ? Promise.resolve({ data: offline?.anime, cached: false, savedAt: 0 })
+        : animeDetail(id, signal),
+    [id, params.get('view') || 'about', session?.token, session?.verified, downloadId, offline],
+    () =>
+      downloadId
+        ? offline && { data: offline.anime, cached: false, savedAt: 0 }
+        : peekAnimeDetail(id)
   );
   const videos = useResource(
-    signal => animeVideos(Number(id), signal),
-    [id, session?.token, session?.verified],
-    () => peekAnimeVideos(Number(id))
+    signal =>
+      downloadId
+        ? Promise.resolve({ data: offline?.videos || [], cached: false, savedAt: 0 })
+        : animeVideos(Number(id), signal),
+    [id, session?.token, session?.verified, downloadId, offline],
+    () =>
+      downloadId
+        ? offline && { data: offline.videos, cached: false, savedAt: 0 }
+        : peekAnimeVideos(Number(id))
   );
   const checkpoint = useRef<{ token: string | null; entry: WatchEntry }>();
   const room = useRef<HTMLDivElement>(null);
+  const [pickingDownloads, setPickingDownloads] = useState(false);
 
   useEffect(() => {
     if (checkpoint.current?.token !== (session?.token || null)) checkpoint.current = undefined;
   }, [session?.token]);
 
-  const anime = resource.value?.data,
-    watching = params.get('view') === 'watch' || params.has('watch');
+  const anime = downloadId ? offline?.anime : resource.value?.data;
+  const loading = downloadId ? !queue && !localError : resource.loading;
   const [panel, setPanel] = useState<MediaPanel>(() =>
     params.get('view') === 'comments' || params.get('panel') === 'comments' ? 'comments' : null
   );
-  const loadingPlayer = watching && (resource.loading || !!resource.error || !anime);
+  const loadingPlayer = watching && (loading || !!localError || !!resource.error || !anime);
   useEffect(() => {
     if (pip?.active && loadingPlayer)
       void setPictureInPictureUnavailable(!!resource.error).catch(() => {});
@@ -91,25 +146,71 @@ export const Detail: FC<TDetailProps> = ({
   }, [query, background]);
 
   const entries = [
-    anime && latestWatchEntry(anime, videos.value?.data || []),
-    library.history.find(entry => entry.anime.anime_id === Number(id)),
+    anime && !downloadId && latestWatchEntry(anime, videos.value?.data || []),
+    anime && downloadId
+      ? downloadHistory(
+          anime,
+          library.history.find(entry => entry.anime.anime_id === Number(id))
+        )
+      : library.history.find(entry => entry.anime.anime_id === Number(id)),
     checkpoint.current?.token === (session?.token || null) ? checkpoint.current.entry : undefined,
     readPlaybackRecovery(Number(id)),
   ].filter((entry): entry is WatchEntry => !!entry && entry.anime.anime_id === Number(id));
-  const history = entries.sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const oldPosition = !session && local && readJSON<number>(`yumiwatch:offline:${local.id}`, 0);
+  const oldVideo = local && offline?.videos.find(video => video.video_id === local.stream?.videoId);
+  if (anime && oldVideo && oldPosition)
+    entries.push({
+      anime,
+      videoId: oldVideo.video_id,
+      episode: oldVideo.number,
+      group: groupKey(oldVideo),
+      position: oldPosition,
+      updatedAt: 0,
+    });
+  const history = isContinueHidden(Number(id))
+    ? undefined
+    : entries.sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const readyQueue = !watching && downloadsAvailable() ? downloads.value : undefined;
+  const availableVideos = videos.value?.data || [];
+  const resume = readyQueue && resumeVideo(availableVideos, history);
+  const localResume = preferredReadyDownload(
+    readyQueue?.filter(
+      entry =>
+        entry.animeId === Number(id) &&
+        (history
+          ? matchesDownloadHistory(entry, history)
+          : entry.episode === (resume?.number || '1'))
+    ),
+    preferredStreamQuality(playbackSettings().quality)
+  );
+  const useLocalRoute =
+    localResume &&
+    (navigator.onLine === false ||
+      !resume ||
+      voiceKey(resume.data.dubbing) !== voiceKey(localResume.voice) ||
+      !availableVideos.some(video => video.video_id === localResume.stream?.videoId));
+  const resumePath = useLocalRoute
+    ? downloadPath(localResume, 'about')
+    : `#/anime/${id}?view=watch&play=1${history ? '' : '&start=1'}`;
 
   const openComments = useCallback(
     () => setPanel(current => (current === 'comments' ? null : 'comments')),
     []
   );
 
+  const downloadFromAbout = !!downloadId && params.get('from') === 'about';
+  const downloadBack = downloadFromAbout
+    ? `#/anime/${id}`
+    : local
+      ? downloadAnimePath(local.animeId)
+      : '#/downloads';
   const backToAbout = useCallback(() => {
     void exitPlayerFullscreen()
       .catch(() => {})
       .then(() => {
-        location.hash = `/anime/${id}`;
+        leavePlayback(downloadId ? downloadBack : `/anime/${id}`);
       });
-  }, [id]);
+  }, [id, downloadId, downloadBack]);
 
   useEffect(() => {
     if (background) return;
@@ -146,7 +247,7 @@ export const Detail: FC<TDetailProps> = ({
     window.addEventListener('keydown', keys);
 
     return () => window.removeEventListener('keydown', keys);
-  }, [watching, id, background]);
+  }, [watching, id, background, backToAbout]);
 
   const shareAnime = useCallback(async () => {
     if (!anime) return;
@@ -161,15 +262,17 @@ export const Detail: FC<TDetailProps> = ({
     }
   }, [anime]);
 
-  const returnLabel = returnTo.startsWith('/search')
-    ? 'Результаты поиска'
-    : returnTo.startsWith('/profile') || returnTo.startsWith('/users/')
-      ? 'Назад к профилю'
-      : returnTo.startsWith('/notifications')
-        ? 'Уведомления'
-        : returnTo.startsWith('/messages')
-          ? 'Сообщения'
-          : 'Каталог аниме';
+  const returnLabel = returnTo.startsWith('/downloads')
+    ? 'Назад к загрузкам'
+    : returnTo.startsWith('/search')
+      ? 'Результаты поиска'
+      : returnTo.startsWith('/profile') || returnTo.startsWith('/users/')
+        ? 'Назад к профилю'
+        : returnTo.startsWith('/notifications')
+          ? 'Уведомления'
+          : returnTo.startsWith('/messages')
+            ? 'Сообщения'
+            : 'Каталог аниме';
 
   const toggleEpisodes = useCallback(
     () => setPanel(current => (current === 'episodes' ? null : 'episodes')),
@@ -188,15 +291,21 @@ export const Detail: FC<TDetailProps> = ({
   return (
     <section class={`anime-detail-screen ${watching ? 'is-watching' : 'is-about'}`}>
       {loadingPlayer && !background && pip && <PictureInPictureButton pip={pip} floating />}
-      <AppLink
-        draggable={false}
-        class={watching ? 'watch-state-back' : 'back-link'}
-        href={watching ? `#/anime/${id}` : `#${returnTo}`}
-      >
-        <Icon name="back" size={18} />
-        {watching ? 'Об аниме' : returnLabel}
-      </AppLink>
-      {resource.loading ? (
+      {watching ? (
+        loadingPlayer &&
+        !background && (
+          <button type="button" class="watch-state-back" onClick={backToAbout}>
+            <Icon name="back" size={18} />
+            {downloadId && !downloadFromAbout ? 'Загрузки' : 'Об аниме'}
+          </button>
+        )
+      ) : (
+        <AppLink draggable={false} class="back-link" href={`#${returnTo}`}>
+          <Icon name="back" size={18} />
+          {returnLabel}
+        </AppLink>
+      )}
+      {loading ? (
         <div class="detail-loading">
           <div class="skeleton detail-poster" />
           <div>
@@ -204,6 +313,13 @@ export const Detail: FC<TDetailProps> = ({
             <div class="skeleton line short" />
           </div>
         </div>
+      ) : localError ? (
+        <Empty
+          title="Не удалось открыть загрузку"
+          action={<ButtonLink href="#/downloads">К загрузкам</ButtonLink>}
+        >
+          {localError}
+        </Empty>
       ) : resource.error ? (
         <ErrorState error={resource.error} retry={resource.retry} />
       ) : (
@@ -211,6 +327,13 @@ export const Detail: FC<TDetailProps> = ({
           <>
             {!watching && resource.value?.cached && !resource.refreshing && (
               <CachedNotice savedAt={resource.value.savedAt} />
+            )}
+            {pickingDownloads && !watching && videos.value && (
+              <DownloadPicker
+                anime={anime}
+                videos={videos.value.data}
+                close={() => setPickingDownloads(false)}
+              />
             )}
             <div ref={room} class={`anime-room ${watching ? 'is-watch' : 'is-info'} `}>
               <div class="room-main">
@@ -245,6 +368,15 @@ export const Detail: FC<TDetailProps> = ({
                             <Icon name="list" size={18} />
                             Серии
                           </Button>
+                          {downloadsAvailable() && videos.value?.data.some(downloadable) && (
+                            <Button
+                              onClick={() => setPickingDownloads(true)}
+                              aria-haspopup="dialog"
+                            >
+                              <Icon name="download" size={18} />
+                              Скачать
+                            </Button>
+                          )}
                           <Button
                             onClick={openComments}
                             aria-expanded={panel === 'comments'}
@@ -257,25 +389,27 @@ export const Detail: FC<TDetailProps> = ({
                         <AnimeListButton anime={anime} />
                       </div>
                     </header>
-                    <AppLink
-                      class="anime-resume-row"
-                      data-nav-primary
-                      href={`#/anime/${id}?view=watch&play=1`}
-                      publicHref={animeSiteUrl(anime)}
-                    >
-                      <span class="resume-row-play">
-                        <Icon name="play" size={24} />
-                      </span>
-                      <span>
-                        <strong>{history ? 'Продолжить просмотр' : 'Начать просмотр'}</strong>
-                        <small>
-                          {history
-                            ? `Серия ${history.episode} · ${formatTime(history.position)}${history.duration ? ` / ${formatTime(history.duration)}` : ''}`
-                            : 'Озвучку и серию можно сменить в плеере'}
-                        </small>
-                      </span>
-                      <Icon name="arrow" size={22} />
-                    </AppLink>
+                    {(canStartAnime(anime) || useLocalRoute) && (
+                      <AppLink
+                        class="anime-resume-row"
+                        data-nav-primary
+                        href={resumePath}
+                        publicHref={animeSiteUrl(anime)}
+                      >
+                        <span class="resume-row-play">
+                          <Icon name="play" size={24} />
+                        </span>
+                        <span>
+                          <strong>{history ? 'Продолжить просмотр' : 'Начать просмотр'}</strong>
+                          <small>
+                            {history
+                              ? `Серия ${history.episode} · ${formatTime(history.position)}${history.duration ? ` / ${formatTime(history.duration)}` : ''}`
+                              : 'Озвучку и серию можно сменить в плеере'}
+                          </small>
+                        </span>
+                        <Icon name="arrow" size={22} />
+                      </AppLink>
+                    )}
                   </>
                 )}
                 {watching ? (
@@ -283,12 +417,15 @@ export const Detail: FC<TDetailProps> = ({
                     presentation="immersive"
                     modeOverride="universal"
                     onBack={backToAbout}
-                    key={anime.anime_id}
+                    backLabel={downloadFromAbout ? 'Об аниме' : undefined}
+                    key={downloadId || anime.anime_id}
                     anime={anime}
+                    offline={offline}
                     history={history}
                     startPlaying={params.has('play')}
-                    preferredVoice={params.get('voice') || undefined}
-                    preferredEpisode={params.get('episode') || undefined}
+                    newWatch={params.has('start')}
+                    preferredVoice={local?.voice || params.get('voice') || undefined}
+                    preferredEpisode={local?.episode || params.get('episode') || undefined}
                     panel={panel}
                     onPanelChange={setPanel}
                     onComments={openComments}

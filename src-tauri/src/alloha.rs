@@ -34,6 +34,17 @@ pub struct Session {
 
 pub type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
+#[cfg(desktop)]
+pub async fn resource_url(sessions: &Sessions, session: &str, resource: &str) -> Option<Url> {
+    sessions
+        .lock()
+        .await
+        .get(session)?
+        .resources
+        .get(resource)
+        .cloned()
+}
+
 impl Session {
     fn expired(&self) -> bool {
         self.used.elapsed() > Duration::from_secs(180)
@@ -430,6 +441,9 @@ pub async fn relay(
     }) {
         if !url.path().to_lowercase().ends_with(".m3u8") {
             headers.insert("range", range.clone());
+            if let Some(validator) = incoming.get("if-range") {
+                headers.insert("if-range", validator.clone());
+            }
         }
     }
     let response = client
@@ -453,6 +467,8 @@ pub async fn relay(
         || url.path().to_lowercase().ends_with(".m3u8");
     if playlist && method == Method::GET {
         let bytes = limited_body(response, 512000).await?;
+        #[cfg(desktop)]
+        let revision = crate::downloads::manifest_digest(&bytes);
         let text = std::str::from_utf8(&bytes).map_err(|_| "Некорректный плейлист Alloha.")?;
         let mut sessions = sessions.lock().await;
         let session = sessions
@@ -463,11 +479,12 @@ pub async fn relay(
                 .register(raw)
                 .map(|path| path.rsplit('/').next().unwrap().into())
         })?;
-        Ok(Response::builder()
+        let response = Response::builder()
             .status(StatusCode::OK)
-            .header("content-type", "application/vnd.apple.mpegurl")
-            .body(rewritten.into_bytes())
-            .unwrap())
+            .header("content-type", "application/vnd.apple.mpegurl");
+        #[cfg(desktop)]
+        let response = response.header(crate::downloads::MANIFEST_ID, revision);
+        Ok(response.body(rewritten.into_bytes()).unwrap())
     } else {
         let mut builder = Response::builder().status(response.status());
         for key in [
@@ -475,6 +492,7 @@ pub async fn relay(
             "content-length",
             "content-range",
             "accept-ranges",
+            "etag",
         ] {
             if let Some(value) = response.headers().get(key) {
                 builder = builder.header(key, value);

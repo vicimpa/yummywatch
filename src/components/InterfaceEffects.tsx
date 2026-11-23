@@ -1,26 +1,23 @@
 import type { FunctionalComponent as FC } from 'preact';
-import { useEffect, useRef } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 
-import {
-  browserFullscreenElement,
-  desktopFullscreen,
-  desktopFullscreenChanging,
-  exitBrowserFullscreen,
-  exitDesktopFullscreen,
-} from '~/lib/desktop';
 import { useInterfaceSettings } from '~/lib/interface-settings';
-import { focusTarget, keyboardTargets, revealFocus } from '~/lib/keyboard-navigation';
-import { notify } from '~/lib/notifications';
+import { revealFocus } from '~/lib/keyboard-navigation';
+import { installDirectionalNavigation } from '~/lib/directional-navigation';
 import { installSelectionPolicy } from '~/lib/text-selection';
+import { isTvMode } from '~/lib/tv-mode';
 
-export type TInterfaceEffectsProps = { onBack: () => void; watching: boolean };
+export type TInterfaceEffectsProps = { path?: string; onBack: () => void };
 
-export const InterfaceEffects: FC<TInterfaceEffectsProps> = ({ onBack, watching }) => {
+export const InterfaceEffects: FC<TInterfaceEffectsProps> = ({ path = '/', onBack }) => {
   const settings = useInterfaceSettings(),
     context = useRef<AudioContext>();
-  const latest = useRef({ settings, onBack, watching });
+  const latest = useRef({ settings, onBack, path });
+  const navigation = useRef<ReturnType<typeof installDirectionalNavigation>>();
 
-  latest.current = { settings, onBack, watching };
+  latest.current = { settings, onBack, path };
+
+  useLayoutEffect(() => navigation.current?.navigate(path), [path]);
 
   useEffect(() => {
     document.documentElement.dataset.motion = settings.animations ? 'on' : 'off';
@@ -31,24 +28,29 @@ export const InterfaceEffects: FC<TInterfaceEffectsProps> = ({ onBack, watching 
   useEffect(() => {
     const releaseSelection = installSelectionPolicy();
     let lastTarget: Element | null = null,
-      keyboardInput = false,
       pointerHoverArmed = true,
       hoverMutedUntil = 0,
       pointerX = -1,
       pointerY = -1,
       focusFrame = 0;
 
+    const root = document.documentElement;
+    const keyboardInput = () => root.dataset.inputMode === 'keyboard';
+    root.dataset.inputMode = isTvMode() ? 'keyboard' : 'pointer';
+
     const reveal = () => {
       cancelAnimationFrame(focusFrame);
-      if (keyboardInput)
+      if (keyboardInput())
         focusFrame = requestAnimationFrame(() => {
           if (document.activeElement instanceof HTMLElement) revealFocus(document.activeElement);
         });
     };
 
     const pointerMode = () => {
-      document.documentElement.dataset.inputMode = 'pointer';
-      keyboardInput = false;
+      if (!keyboardInput()) return;
+      root.dataset.inputMode = 'pointer';
+      navigation.current?.suspend();
+      lastTarget = null;
       cancelAnimationFrame(focusFrame);
     };
 
@@ -75,43 +77,11 @@ export const InterfaceEffects: FC<TInterfaceEffectsProps> = ({ onBack, watching 
       if (event.clientX === pointerX && event.clientY === pointerY) return;
       pointerX = event.clientX;
       pointerY = event.clientY;
+      if (event.pointerType !== 'touch') pointerMode();
       if (!pointerHoverArmed && performance.now() >= hoverMutedUntil) {
         pointerHoverArmed = true;
         lastTarget = null;
         hover(event);
-      }
-    };
-
-    const keyboardFocus = (event: KeyboardEvent) => {
-      if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
-      keyboardInput = true;
-      document.documentElement.dataset.inputMode = 'keyboard';
-      unlock();
-      if (event.defaultPrevented || event.key !== 'Tab') return;
-
-      const scope =
-        [...document.querySelectorAll('dialog[open]')].at(-1) ||
-        document.querySelector('[data-sidebar-open=true]') ||
-        document.getElementById('app');
-
-      if (!scope) return;
-
-      const targets = keyboardTargets(scope);
-
-      if (!targets.length) return;
-
-      const index = targets.indexOf(document.activeElement as HTMLElement),
-        step = event.shiftKey ? -1 : 1;
-      const next =
-        index < 0
-          ? event.shiftKey
-            ? targets.at(-1)
-            : targets[0]
-          : targets[(index + step + targets.length) % targets.length];
-
-      if (next) {
-        event.preventDefault();
-        focusTarget(next);
       }
     };
 
@@ -168,11 +138,7 @@ export const InterfaceEffects: FC<TInterfaceEffectsProps> = ({ onBack, watching 
     };
 
     const hover = (event: Event) => {
-      if (event.type === 'focusin' ? !keyboardInput : !pointerHoverArmed) return;
-      if (event instanceof MouseEvent) {
-        pointerX = event.clientX;
-        pointerY = event.clientY;
-      }
+      if (event.type === 'focusin' ? !keyboardInput() : !pointerHoverArmed) return;
       const target =
         event.target instanceof Element
           ? event.target.closest('button,a[href],[role=button]')
@@ -194,169 +160,24 @@ export const InterfaceEffects: FC<TInterfaceEffectsProps> = ({ onBack, watching 
       sound('activate');
     };
 
-    const keyboard = (event: KeyboardEvent) => {
-      if (
-        event.defaultPrevented ||
-        event.isComposing ||
-        event.altKey ||
-        event.ctrlKey ||
-        event.metaKey
-      )
-        return;
-
-      const target = event.target instanceof HTMLElement ? event.target : null;
-      const vertical = event.key === 'ArrowUp' || event.key === 'ArrowDown',
-        field = target?.closest('input,select');
-      const editing =
-        target?.closest('textarea,[contenteditable]:not([contenteditable=false])') ||
-        (field && !vertical);
-      if (editing && event.key !== 'Escape') return;
-
-      const sidebar = document.querySelector<HTMLElement>('[data-sidebar-open=true]'),
-        dialog = [...document.querySelectorAll<HTMLElement>('dialog[open],.video-settings')].at(-1);
-
-      if (event.key === 'Escape' || event.key === 'Backspace') {
-        if (sidebar || dialog) return;
-        const browserFullscreen = browserFullscreenElement();
-        if (event.key === 'Escape') {
-          if (event.repeat || desktopFullscreenChanging()) {
-            event.preventDefault();
-            return;
-          }
-          if (browserFullscreen || desktopFullscreen()) {
-            event.preventDefault();
-            const exit = browserFullscreen ? exitBrowserFullscreen : exitDesktopFullscreen;
-            void exit().catch(() => notify('Не удалось выйти из полного экрана.'));
-            return;
-          }
-        }
-        if (editing || browserFullscreen) return;
-        event.preventDefault();
-        latest.current.onBack();
-
-        return;
-      }
-      if (event.key === '/' || event.code === 'Slash') {
-        event.preventDefault();
-        location.hash = '/search';
-
-        return;
-      }
-      if (
-        !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) ||
-        (dialog && !vertical)
-      )
-        return;
-      if (field && vertical) event.preventDefault();
-      if (
-        latest.current.watching &&
-        !sidebar &&
-        ['ArrowLeft', 'ArrowRight'].includes(event.key) &&
-        !target?.closest(
-          '.video-toolbar button,.video-top-actions button,.native-auto-action button'
-        )
-      )
-        return;
-
-      const scope =
-        dialog || sidebar || document.getElementById('app') || document.getElementById('main');
-
-      if (!scope) return;
-
-      let candidates = keyboardTargets(scope);
-      const active = document.activeElement as HTMLElement;
-      const main = sidebar || document.getElementById('main');
-
-      const first = () =>
-        candidates.find(
-          node => main?.contains(node) && node.matches('[data-nav-primary],[data-gallery-link]')
-        ) ||
-        candidates.find(node => main?.contains(node)) ||
-        candidates[0];
-
-      if (!candidates.includes(active)) {
-        const target = first();
-
-        if (target) {
-          event.preventDefault();
-          focusTarget(target);
-        }
-
-        return;
-      }
-
-      const menu = active.closest('.media-nav,.navigation-sidebar');
-
-      if (menu && !vertical) {
-        event.preventDefault();
-        if (event.key === 'ArrowRight' && !sidebar) {
-          const target = first();
-
-          if (target) focusTarget(target);
-        }
-
-        return;
-      }
-      if (menu && ['ArrowUp', 'ArrowDown'].includes(event.key)) {
-        const targets = candidates.filter(node => menu.contains(node)),
-          index = targets.indexOf(active),
-          step = event.key === 'ArrowUp' ? -1 : 1;
-
-        event.preventDefault();
-        focusTarget(targets[Math.max(0, Math.min(targets.length - 1, index + step))]);
-
-        return;
-      }
-
-      const rect = active.getBoundingClientRect(),
-        horizontal = event.key === 'ArrowLeft' || event.key === 'ArrowRight',
-        direction = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1;
-      const next = candidates
-        .filter(node => node !== active)
-        .map(node => {
-          const box = node.getBoundingClientRect(),
-            dx = box.x + box.width / 2 - rect.x - rect.width / 2,
-            dy = box.y + box.height / 2 - rect.y - rect.height / 2;
-
-          return {
-            node,
-            along: horizontal ? dx : dy,
-            across: horizontal ? dy : dx,
-            height: box.height,
-          };
-        })
-        .filter(
-          item =>
-            item.along * direction > 2 &&
-            (!horizontal ||
-              Math.abs(item.across) <= Math.max(8, Math.min(rect.height, item.height) / 2))
-        )
-        .sort(
-          (a, b) =>
-            Math.abs(a.along) + Math.abs(a.across) * 4 - Math.abs(b.along) - Math.abs(b.across) * 4
-        )[0];
-
-      if (next) {
-        event.preventDefault();
-        focusTarget(next.node);
-      }
-    };
+    navigation.current = installDirectionalNavigation(() => latest.current.onBack(), unlock);
+    navigation.current.navigate(latest.current.path);
 
     document.addEventListener('pointerdown', pointer, true);
     document.addEventListener('wheel', scrollInput, { passive: true, capture: true });
     document.addEventListener('touchstart', scrollInput, { passive: true, capture: true });
     document.addEventListener('scroll', muteScrollHover, { passive: true, capture: true });
     document.addEventListener('pointermove', pointerMove, { passive: true });
-    document.addEventListener('keydown', keyboardFocus, true);
     document.addEventListener('pointerover', hover);
     document.addEventListener('focusin', hover);
     document.addEventListener('focusin', reveal);
     document.addEventListener('click', activate);
-    window.addEventListener('keydown', keyboard);
     window.addEventListener('resize', reveal);
     document.addEventListener('load', reveal, true);
 
     return () => {
+      navigation.current?.dispose();
+      navigation.current = undefined;
       releaseSelection();
       cancelAnimationFrame(focusFrame);
       document.removeEventListener('pointerdown', pointer, true);
@@ -364,12 +185,10 @@ export const InterfaceEffects: FC<TInterfaceEffectsProps> = ({ onBack, watching 
       document.removeEventListener('touchstart', scrollInput, true);
       document.removeEventListener('scroll', muteScrollHover, true);
       document.removeEventListener('pointermove', pointerMove);
-      document.removeEventListener('keydown', keyboardFocus, true);
       document.removeEventListener('pointerover', hover);
       document.removeEventListener('focusin', hover);
       document.removeEventListener('focusin', reveal);
       document.removeEventListener('click', activate);
-      window.removeEventListener('keydown', keyboard);
       window.removeEventListener('resize', reveal);
       document.removeEventListener('load', reveal, true);
       void context.current?.close().catch(() => {});

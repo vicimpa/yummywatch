@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, within } from '@testing-library/preact';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/preact';
 
 import { AnimeAbout, type TAnimeAboutProps } from '~/components/AnimeAbout';
 import { groupKey } from '~/lib/player';
@@ -28,18 +28,24 @@ vi.mock('~/lib/hooks', async original => ({
 
 afterEach(cleanup);
 
-it('counts unique episodes across providers and updates resume links and refreshed voices', () => {
+it('shows unique episodes and keeps the original players and subscriptions for the selected voice', () => {
   const first = { ...video('1'), iframe_url: 'https://kodik.info/one' };
   const second = { ...video('2'), iframe_url: 'https://kodik.info/two' };
 
   source.videos = [first, second, video('1', 'AniLiberty', 2), video('1', 'Субтитры AniLibria')];
 
-  const { container, rerender } = render(<AnimeAbout anime={anime} videos={videosResource()} />);
-  const voices = screen.getByRole('region', { name: 'Доступные озвучки' });
+  const { rerender } = render(<AnimeAbout anime={anime} videos={videosResource()} />);
+  const voices = screen.getByRole('region', { name: 'Серии и озвучки' });
+  const tabs = within(voices).getByRole('group', { name: 'Озвучка серий' });
 
-  expect(within(voices).getByText('Наш плеер · 2 серий')).toBeTruthy();
-  expect(within(voices).getByText('Наш плеер · 1 серий')).toBeTruthy();
-  expect(container.querySelectorAll('.voice-source-group')).toHaveLength(2);
+  expect(voices.querySelector('.voice-tile')).toBeNull();
+  expect(within(voices).getAllByRole('link', { name: /^Серия / })).toHaveLength(2);
+  fireEvent.click(within(tabs).getByRole('button', { name: 'Субтитры AniLibria' }));
+  expect(within(voices).getAllByRole('link', { name: /^Серия / })).toHaveLength(1);
+  expect(within(voices).getByText('Нет в этой озвучке')).toBeTruthy();
+  fireEvent.click(within(tabs).getByRole('button', { name: 'AniLibria' }));
+  const sources = within(voices).getByText('Оригинальные плееры и подписки').closest('details')!;
+  sources.open = true;
   expect(within(voices).getAllByRole('link', { name: 'Player 1' })[0].getAttribute('href')).toBe(
     first.iframe_url
   );
@@ -60,5 +66,5 @@ it('counts unique episodes across providers and updates resume links and refresh
   );
   source.videos = [...source.videos, video('3')];
   rerender(<AnimeAbout anime={{ ...anime }} videos={videosResource()} history={history} />);
-  expect(within(voices).getByText('Наш плеер · 3 серий')).toBeTruthy();
+  expect(within(voices).getAllByRole('link', { name: /^Серия / })).toHaveLength(3);
 });

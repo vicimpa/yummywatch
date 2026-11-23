@@ -1,7 +1,10 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import type { PresencePlayback } from '~/core/DiscordPresence';
-import { recordWatch } from '~/lib/library';
+import { recordWatch, watchActivity } from '~/lib/library';
+import { savePlaybackRecovery } from '~/lib/playback-recovery';
+import { trackVoice, type VoiceChoice } from '~/lib/voice-ranking';
+import { getSession } from '~/lib/session';
 import { notify } from '~/lib/notifications';
 import { PLAYBACK_FLUSH } from '~/lib/playback-settings';
 import {
@@ -21,6 +24,9 @@ type TSourcePlaybackOptions = {
   token: string | null;
   scope: string;
   startPlaying?: boolean;
+  run: number;
+  voiceChoice: VoiceChoice;
+  transfer?: { position: number; duration: number };
   autoNext: boolean;
   next?: Video;
   onEnded: (video: Video) => void;
@@ -36,6 +42,9 @@ export function useSourcePlayback({
   token,
   scope,
   startPlaying,
+  run,
+  voiceChoice,
+  transfer,
   ...callbacks
 }: TSourcePlaybackOptions) {
   const iframe = useRef<HTMLIFrameElement>(null);
@@ -53,6 +62,7 @@ export function useSourcePlayback({
   const [presence, setPresence] = useState<PresencePlayback & { videoId: number }>();
 
   const initial = useMemo(() => {
+    if (transfer) return transfer;
     const saved = current ? videoPosition(current, history) : { position: 0, duration: 0 };
 
     return saved.duration > 0 && saved.duration - saved.position <= 20
@@ -85,8 +95,13 @@ export function useSourcePlayback({
     let length = initial.duration;
     let dirty = false;
     let started = false;
+    let active = false;
     let restored = false;
     let failed = false;
+    let completed = false;
+    let watched = 0;
+    let nextActivity = 0;
+    let voted = false;
 
     setPosition(time);
     setDuration(length);
@@ -97,9 +112,15 @@ export function useSourcePlayback({
     setPresence(undefined);
 
     const flush = () => {
+      if ((getSession()?.token || null) !== token) return;
+      if (watched > 0) {
+        trackVoice(current.data.dubbing, watched, voiceChoice, !voted);
+        voted = true;
+        watched = 0;
+      }
       if (!dirty) return;
       dirty = false;
-      onCheckpoint?.({
+      const entry = {
         anime,
         episode: current.number,
         videoId: current.video_id,
@@ -107,8 +128,11 @@ export function useSourcePlayback({
         updatedAt: Date.now(),
         position: time,
         duration: length,
-      });
-      void recordWatch(anime, current, groupKey(current), time, length, token)
+        completed,
+      };
+      savePlaybackRecovery(entry, token, run);
+      onCheckpoint?.(entry);
+      void recordWatch(anime, current, groupKey(current), time, length, token, run)
         .then(() => {
           failed = false;
         })
@@ -128,42 +152,63 @@ export function useSourcePlayback({
 
       const playback = playbackEvent(event.data);
 
-      if (playback === 'play') playing = true;
-      if (playback === 'pause' || playback === 'ended') playing = false;
-      if (playback === 'play' && !started) {
-        started = true;
-        dirty = true;
-        flush();
+      if (playback === 'play') {
+        playing = true;
+        if (!started) {
+          started = true;
+          dirty = true;
+          flush();
+        }
       }
+      if (playback === 'pause' || playback === 'ended') playing = false;
 
       const value = playbackMessage(event.data);
 
       if (value?.duration !== undefined) {
         length = value.duration;
         setDuration(length);
-        if (length > 0 && !restored && initial.position > 5) {
+        if (length > 0 && !restored && initial.position > (transfer ? 0 : 5)) {
           restored = true;
-          send('seek', Math.max(0, initial.position - 5));
+          send('seek', Math.max(0, Math.min(length - 1, initial.position - (transfer ? 0 : 5))));
         }
       }
       if (value?.time !== undefined) {
-        if (!observesPlayback && value.time > time) playing = true;
-        lastProgress = Date.now();
+        const now = Date.now();
+        const delta = value.time - time;
+        const elapsed = (now - lastProgress) / 1000;
+        const advanced = delta > 0 && delta <= Math.max(1, elapsed * 2 + 0.5);
+        if (!observesPlayback && advanced) playing = true;
+        if (playing && advanced) {
+          if (!active) {
+            active = true;
+            watchActivity(anime, current, token, run, 'start');
+          }
+          watched += Math.min(elapsed, delta);
+          if (now >= nextActivity) {
+            watchActivity(anime, current, token, run, 'progress');
+            nextActivity = now + 60000;
+          }
+          const ending = current.skips?.ending?.time;
+          if (!completed && ending && time < ending && value.time >= ending) {
+            completed = true;
+            watchActivity(anime, current, token, run, 'complete');
+          }
+        }
+        lastProgress = now;
         time = value.time;
         setPosition(Math.floor(time));
         if (started) dirty = true;
+        else if (!observesPlayback && time > 0) {
+          started = true;
+          dirty = true;
+          flush();
+        }
         setProgress(previous => ({
           ...previous,
           [current.video_id]: { position: time, duration: length },
         }));
         if (!length && typeof event.data === 'string')
           iframe.current?.contentWindow?.postMessage('{"api":"duration"}', origin);
-        if (!started && time > 0 && !observesPlayback) {
-          playing = true;
-          started = true;
-          dirty = true;
-          flush();
-        }
       }
       if (playback || value)
         setPresence({
@@ -175,6 +220,10 @@ export function useSourcePlayback({
         });
       if (playback === 'pause') flush();
       if (playback === 'ended') {
+        if (active && !completed && !current.skips?.ending && length > 0 && length - time <= 3) {
+          completed = true;
+          watchActivity(anime, current, token, run, 'complete');
+        }
         if (length) time = length;
         dirty = true;
         flush();
@@ -220,8 +269,8 @@ export function useSourcePlayback({
   }, [current?.video_id, scope]);
 
   const flush = useCallback(() => flushProgress.current(), []);
-  const requestPlay = useCallback(() => {
-    playOnLoad.current = true;
+  const requestPlay = useCallback((playing = true) => {
+    playOnLoad.current = playing;
   }, []);
   const loaded = useCallback(() => {
     if (!playOnLoad.current) return;

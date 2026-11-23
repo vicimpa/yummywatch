@@ -4,6 +4,7 @@ import type { Installation } from '~/hooks/useInstallation';
 
 import { AccountPage } from './Account';
 import { ConnectionSettings } from './ConnectionSettings';
+import { DownloadsPage } from './Downloads';
 import { Detail } from './Detail';
 import { Schedule } from './Schedule';
 import { Settings } from './Settings';
@@ -25,6 +26,8 @@ export const RoutePage: FC<TRoutePageProps> = ({ route, query, returnTo, install
     case '/catalog':
     case '/search':
       return null;
+    case '/downloads':
+      return <DownloadsPage query={query} />;
     case '/schedule':
       return <Schedule />;
     case '/account':
@@ -40,6 +43,13 @@ export const RoutePage: FC<TRoutePageProps> = ({ route, query, returnTo, install
     case '/settings':
       return <Settings {...installation} />;
   }
+
+  const downloadAnime = /^\/downloads\/anime\/([1-9]\d*)$/.exec(route);
+  if (downloadAnime && Number.isSafeInteger(Number(downloadAnime[1])))
+    return <DownloadsPage animeId={Number(downloadAnime[1])} />;
+
+  if (/^\/downloads\/[a-f0-9]{32}$/.test(route))
+    return <DownloadsPage id={route.slice('/downloads/'.length)} />;
 
   if (/^\/users\/id[1-9]\d*$/.test(route) && Number.isSafeInteger(Number(route.slice(9))))
     return <ProfilePage key={route} userId={Number(route.slice(9))} query={query} />;

@@ -1,7 +1,7 @@
 import { animeSiteUrl } from '~/lib/content-links';
 import { AppLink } from '~/ui/AppLink';
 import type { FunctionalComponent as FC } from 'preact';
-import { useCallback, useLayoutEffect, useMemo, useState } from 'preact/hooks';
+import { useCallback, useMemo, useState } from 'preact/hooks';
 
 import { imageUrl, plainText } from '~/lib/api';
 import { cardMenuEvents } from '~/lib/card-context';
@@ -9,11 +9,11 @@ import { playbackUrl, videoPosition } from '~/lib/player';
 import { groupVoices } from '~/lib/streams';
 import type { Anime, Result, Video, WatchEntry } from '~/lib/types';
 
-import { AboutEpisodes } from './AboutEpisodes';
+import { AboutEpisodes, AnimeEpisodeList } from './AboutEpisodes';
 import { AnimeRatingStats } from './AnimeRatingStats';
 import { PersonalRating } from './PersonalRating';
 import { EpisodeSubscriptionButton, useEpisodeSubscriptions } from './EpisodeSubscription';
-import { ArtworkImage, Button, ButtonLink, FormError, Icon, Sheet } from '~/ui';
+import { ArtworkImage, Button, ButtonLink, Icon, Sheet } from '~/ui';
 
 export type TAnimeAboutProps = {
   anime: Anime;
@@ -58,7 +58,6 @@ export const AnimeAbout: FC<TAnimeAboutProps> = ({
 
         return {
           ...group,
-          episodeCount: new Set(group.videos.map(video => video.number)).size,
           providers: [...providers.values()].map(choices =>
             choices.sort((a, b) => a.number.localeCompare(b.number, 'ru', { numeric: true }))
           ),
@@ -86,6 +85,41 @@ export const AnimeAbout: FC<TAnimeAboutProps> = ({
     [anime.random_screenshots]
   );
   const description = useMemo(() => plainText(anime.description), [anime.description]);
+  const [selectedVoice, setSelectedVoice] = useState('');
+  const episodeList = {
+    anime,
+    videos: all,
+    history,
+    loading: videos.loading,
+    error: videos.error,
+    retry: videos.retry,
+    selectedVoice,
+    onVoiceChange: setSelectedVoice,
+    renderSubscription: (key: string) => {
+      const group = voices.find(voice => voice.key === key);
+      if (!group?.providers.length) return;
+      if (group.providers.length === 1)
+        return (
+          <EpisodeSubscriptionButton
+            video={group.providers[0].video}
+            subscription={subscriptions}
+          />
+        );
+      return (
+        <details key={key} class="episode-original-players">
+          <summary>
+            <Icon name="bell" size={15} /> Уведомлять о сериях
+          </summary>
+          {group.providers.map(({ video }) => (
+            <div class="voice-subscription" key={video.data.player_id}>
+              <span>{video.data.player.replace(/^Плеер /, '')}</span>
+              <EpisodeSubscriptionButton video={video} subscription={subscriptions} />
+            </div>
+          ))}
+        </details>
+      );
+    },
+  };
   const [frame, setFrame] = useState<number>();
   const closeFrame = useCallback(() => setFrame(undefined), []);
   const previousFrame = useCallback(
@@ -96,25 +130,6 @@ export const AnimeAbout: FC<TAnimeAboutProps> = ({
     () => setFrame(previous => ((previous || 0) + 1) % frames.length),
     [frames.length]
   );
-
-  useLayoutEffect(() => {
-    if (frame === undefined) return;
-
-    const key = (event: KeyboardEvent) => {
-      if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-        event.preventDefault();
-        setFrame(
-          previous =>
-            ((previous || 0) + (event.key === 'ArrowRight' ? 1 : -1) + frames.length) %
-            frames.length
-        );
-      }
-    };
-
-    window.addEventListener('keydown', key);
-
-    return () => window.removeEventListener('keydown', key);
-  }, [frame, frames.length]);
 
   return (
     <div class="anime-about-content">
@@ -203,58 +218,36 @@ export const AnimeAbout: FC<TAnimeAboutProps> = ({
       <AnimeRatingStats animeId={anime.anime_id}>
         <PersonalRating anime={anime} saved={onRatingSaved} />
       </AnimeRatingStats>
-      <section class="about-voices" aria-label="Доступные озвучки">
+      <section class="about-voices" aria-label="Серии и озвучки">
         <div class="section-heading">
-          <h2>Доступные озвучки</h2>
-          <span class="muted">{voices.length || ''}</span>
+          <h2>Серии и озвучки</h2>
         </div>
-        {videos.loading ? (
-          <p role="status" class="collection-note">
-            Загружаем озвучки…
-          </p>
-        ) : videos.error ? (
-          <FormError class="account-error">
-            {videos.error}
-            <Button onClick={videos.retry} variant="text">
-              Повторить
-            </Button>
-          </FormError>
-        ) : voices.length ? (
-          <div class="voice-gallery">
-            {voices.map(group => (
-              <div key={group.key} class="voice-source-group">
-                <AppLink
-                  class="voice-tile"
-                  href={`#/anime/${anime.anime_id}?view=watch&play=1&voice=${encodeURIComponent(group.name)}`}
-                  publicHref={animeSiteUrl(anime)}
-                >
-                  <span class="voice-tile-icon">
-                    <Icon name={/субтитры/i.test(group.name) ? 'comment' : 'volume'} size={22} />
-                  </span>
-                  <span>
-                    <strong>{group.name.replace(/^Озвучка /, '')}</strong>
-                    <small>Наш плеер · {group.episodeCount} серий</small>
-                  </span>
-                  <Icon name="play" size={19} />
-                </AppLink>
-                <div class="voice-original-players">
-                  <small>Оригинальные плееры</small>
-                  {group.providers.map(({ video, href }) => (
-                    <div key={video.data.player_id} class="voice-subscription">
-                      <AppLink href={href} target="_blank" rel="noreferrer">
-                        {video.data.player.replace(/^Плеер /, '')}
-                        <Icon name="external" size={13} />
-                      </AppLink>
-                      <EpisodeSubscriptionButton video={video} subscription={subscriptions} />
+        <div class="episodes-sidebar about-inline-episodes">
+          <AnimeEpisodeList
+            {...episodeList}
+            active={!episodesOpen}
+            renderSources={key => {
+              const group = voices.find(voice => voice.key === key);
+              return (
+                group && (
+                  <details key={group.key} class="episode-original-players">
+                    <summary>Оригинальные плееры и подписки</summary>
+                    <div class="voice-original-players">
+                      {group.providers.map(({ video, href }) => (
+                        <div key={video.data.player_id} class="voice-subscription">
+                          <AppLink href={href} target="_blank" rel="noreferrer">
+                            {video.data.player.replace(/^Плеер /, '')}
+                            <Icon name="external" size={13} />
+                          </AppLink>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p class="collection-note">Серии и озвучки ещё не появились.</p>
-        )}
+                  </details>
+                )
+              );
+            }}
+          />
+        </div>
       </section>
       {!!anime.viewing_order?.length && (
         <section class="about-order" id="viewing-order">
@@ -296,22 +289,20 @@ export const AnimeAbout: FC<TAnimeAboutProps> = ({
         Открыть на YummyAnime
         <Icon name="external" size={16} />
       </ButtonLink>
-      <AboutEpisodes
-        anime={anime}
-        videos={all}
-        history={history}
-        open={episodesOpen}
-        close={closeEpisodes}
-        loading={videos.loading}
-        error={videos.error}
-        retry={videos.retry}
-      />
+      <AboutEpisodes {...episodeList} open={episodesOpen} close={closeEpisodes} />
       {frame !== undefined && frames[frame] && (
         <Sheet
           title={`Скриншот ${frame + 1} из ${frames.length}`}
           subtitle={anime.title}
           close={closeFrame}
           className="screenshot-viewer"
+          onKeyDown={event => {
+            if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
+            if (event.key === 'ArrowRight') nextFrame();
+            else if (event.key === 'ArrowLeft') previousFrame();
+            else return;
+            event.preventDefault();
+          }}
           footer={
             <div class="screenshot-viewer-actions">
               <Button aria-label="Предыдущий скриншот" onClick={previousFrame}>
