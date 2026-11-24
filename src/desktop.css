@@ -223,7 +223,11 @@ html[data-desktop='macos'][data-interface-style='contrast'] .gallery-feature {
   }
 }
 
-/* AppKit draws video behind the transparent WKWebView. Its overlays remain interactive. */
+/* The native video surface sits below the WebView and its interactive controls. */
+html[data-desktop='windows'][data-native-video],
+html[data-desktop='linux'][data-native-video],
+html[data-desktop='windows'][data-native-video] body,
+html[data-desktop='linux'][data-native-video] body,
 html[data-desktop='macos'][data-native-video] body,
 html[data-mobile='android'][data-native-video],
 html[data-mobile='android'][data-native-video] body,
@@ -239,15 +243,6 @@ html[data-native-video] .native-video-frame {
 .native-stream-layer.native-stream-ready {
   background: transparent;
   background-image: none !important;
-}
-.native-stream-layer > canvas {
-  display: none;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-.native-stream-ready > canvas {
-  display: block;
 }
 
 /* Backdrop filters require a fresh composite as their panels move or resize. */

@@ -11,8 +11,8 @@ import { usePlaybackWakeLock } from '~/hooks/usePlaybackWakeLock';
 import {
   NativePlayback,
   setPictureInPictureUnavailable,
-  usesCanvasPlayback,
   usesAndroidNativePlayback,
+  usesDesktopNativeSurface,
   usesMacNativePlayback,
   type PictureInPictureControls,
 } from '~/lib/native-playback';
@@ -140,17 +140,16 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
 
   const [reload, setReload] = useState(0);
   const macNative = import.meta.env.VITE_NATIVE_VIDEO_ONLY === 'true' || usesMacNativePlayback();
-  const nativeSurface = macNative || usesAndroidNativePlayback();
-  const native = nativeSurface || usesCanvasPlayback();
+  const native = macNative || usesDesktopNativeSurface() || usesAndroidNativePlayback();
   useLayoutEffect(() => {
-    if (!nativeSurface || background) return;
+    if (!native || background) return;
     const root = document.documentElement;
     root.dataset.nativeVideo = 'true';
 
     return () => {
       delete root.dataset.nativeVideo;
     };
-  }, [nativeSurface, background]);
+  }, [native, background]);
 
   const webVideos = useMemo(
     () => [createRef<HTMLVideoElement>(), createRef<HTMLVideoElement>()],
@@ -847,7 +846,7 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
   return (
     <div
       ref={frame}
-      class={`player-frame universal-frame ${nativeSurface ? 'native-video-frame' : ''} ${controlsVisible ? '' : 'controls-idle'}`}
+      class={`player-frame universal-frame ${native ? 'native-video-frame' : ''} ${controlsVisible ? '' : 'controls-idle'}`}
     >
       {layers.map((layer, slot) => {
         if (!layer) return null;

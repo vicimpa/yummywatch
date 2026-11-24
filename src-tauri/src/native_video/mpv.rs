@@ -7,8 +7,13 @@ use std::{
 use std::path::Path;
 #[cfg(any(target_os = "windows", target_os = "android"))]
 use std::sync::OnceLock;
+#[cfg(target_os = "linux")]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
-// Stable subset of the libmpv 2.x client and software rendering ABIs.
+// Stable subset of the libmpv 2.x client and rendering ABIs.
 macro_rules! mpv_api {
     ($($(#[$attr:meta])* fn $name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?;)*) => {
         pub(super) struct Api {
@@ -59,19 +64,23 @@ mpv_api! {
     fn mpv_initialize(handle: *mut c_void) -> c_int;
     fn mpv_terminate_destroy(handle: *mut c_void);
     fn mpv_set_option_string(handle: *mut c_void, name: *const c_char, value: *const c_char) -> c_int;
+    #[cfg(not(target_os = "android"))]
+    fn mpv_command(handle: *mut c_void, args: *const *const c_char) -> c_int;
     fn mpv_command_async(handle: *mut c_void, reply: u64, args: *const *const c_char) -> c_int;
     fn mpv_set_property_async(handle: *mut c_void, reply: u64, name: *const c_char, format: c_int, data: *mut c_void) -> c_int;
     fn mpv_get_property(handle: *mut c_void, name: *const c_char, format: c_int, data: *mut c_void) -> c_int;
     fn mpv_wait_event(handle: *mut c_void, timeout: f64) -> *const Event;
     fn mpv_error_string(error: c_int) -> *const c_char;
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "linux", test))]
     fn mpv_render_context_create(ctx: *mut *mut c_void, handle: *mut c_void, params: *mut RenderParam) -> c_int;
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "linux", test))]
     fn mpv_render_context_update(ctx: *mut c_void) -> u64;
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "linux", test))]
     fn mpv_render_context_render(ctx: *mut c_void, params: *mut RenderParam) -> c_int;
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "linux", test))]
     fn mpv_render_context_free(ctx: *mut c_void);
+    #[cfg(target_os = "linux")]
+    fn mpv_render_context_set_update_callback(ctx: *mut c_void, callback: Option<unsafe extern "C" fn(*mut c_void)>, data: *mut c_void);
 }
 
 #[cfg(target_os = "windows")]
@@ -121,14 +130,14 @@ pub(super) struct AndroidOutput {
     pub(super) certificates: CString,
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", test))]
 #[repr(C)]
 struct RenderParam {
     kind: c_int,
     data: *mut c_void,
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "linux", test))]
 impl RenderParam {
     fn input<T>(kind: c_int, data: &T) -> Self {
         Self {
@@ -143,16 +152,44 @@ impl RenderParam {
     };
 }
 
+#[cfg(not(target_os = "android"))]
+pub(super) enum DesktopOutput {
+    #[cfg(target_os = "windows")]
+    Window(usize),
+    #[cfg(target_os = "linux")]
+    OpenGl(OpenGlInit),
+    #[cfg(test)]
+    Software,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+pub(super) struct OpenGlInit {
+    pub(super) get_proc_address: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void,
+    pub(super) context: *mut c_void,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct OpenGlFramebuffer {
+    id: c_int,
+    width: c_int,
+    height: c_int,
+    internal_format: c_int,
+}
+
 pub(super) struct Player {
     api: &'static Api,
     handle: NonNull<c_void>,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "linux", test))]
     render: Option<NonNull<c_void>>,
     caption: Option<CString>,
     failure: Option<String>,
     ready: bool,
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "linux", test))]
     render_size: Option<[c_int; 2]>,
+    #[cfg(target_os = "linux")]
+    render_pending: Option<Arc<AtomicBool>>,
     #[cfg(target_os = "android")]
     _surface: jni::objects::GlobalRef,
 }
@@ -170,19 +207,22 @@ impl Player {
         relayed_hls: bool,
         silent: bool,
         #[cfg(target_os = "android")] output: AndroidOutput,
+        #[cfg(not(target_os = "android"))] output: DesktopOutput,
     ) -> Result<Self, String> {
         let handle = NonNull::new(unsafe { (api.mpv_create)() })
             .ok_or("Не удалось создать плеер libmpv.")?;
         let player = Self {
             api,
             handle,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(any(target_os = "linux", test))]
             render: None,
             caption,
             failure: None,
             ready: false,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(any(target_os = "linux", test))]
             render_size: None,
+            #[cfg(target_os = "linux")]
+            render_pending: None,
             #[cfg(target_os = "android")]
             _surface: output.surface,
         };
@@ -222,8 +262,33 @@ impl Player {
         }
         #[cfg(not(target_os = "android"))]
         {
-            player.option(c"vo", c"libmpv")?;
-            player.option(c"hwdec", c"auto-copy")?;
+            player.option(c"osc", c"no")?;
+            match &output {
+                #[cfg(target_os = "windows")]
+                DesktopOutput::Window(handle) => {
+                    let handle = CString::new((*handle as u32).to_string()).unwrap();
+                    player.option(c"wid", &handle)?;
+                    player.option(c"vo", c"gpu")?;
+                    player.option(c"gpu-api", c"d3d11")?;
+                    player.option(c"gpu-context", c"d3d11")?;
+                    player.option(c"hwdec", c"d3d11va,d3d11va-copy")?;
+                    player.option(c"input-vo-keyboard", c"no")?;
+                    player.option(c"input-cursor", c"no")?;
+                }
+                #[cfg(target_os = "linux")]
+                DesktopOutput::OpenGl(_) => {
+                    player.option(c"vo", c"libmpv")?;
+                    player.option(c"hwdec", c"auto-copy")?;
+                }
+                #[cfg(test)]
+                DesktopOutput::Software => {
+                    player.option(c"vo", c"libmpv")?;
+                    player.option(c"hwdec", c"auto-copy")?;
+                }
+            }
+            player.option(c"screenshot-jpeg-quality", c"76")?;
+            // Take previews from the current video frame without waiting for the UI renderer.
+            player.option(c"screenshot-sw", c"yes")?;
         }
         if silent {
             player.option(c"ao", c"null")?;
@@ -243,30 +308,48 @@ impl Player {
         if unsafe { (api.mpv_initialize)(handle.as_ptr()) } < 0 {
             return Err("Не удалось запустить libmpv.".into());
         }
-        #[cfg(not(target_os = "android"))]
-        let player = {
-            let mut player = player;
-            let mut context = ptr::null_mut();
-            let mut params = [
-                RenderParam {
-                    kind: 1,
-                    data: c"sw".as_ptr().cast_mut().cast(),
-                },
-                RenderParam::END,
-            ];
-            if unsafe {
-                (api.mpv_render_context_create)(&mut context, handle.as_ptr(), params.as_mut_ptr())
-            } < 0
-            {
-                return Err("Не удалось создать видеоповерхность libmpv.".into());
+        #[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+        let mut player = player;
+        #[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+        match &output {
+            #[cfg(target_os = "linux")]
+            DesktopOutput::OpenGl(gl) => {
+                player.create_renderer(c"opengl", Some(RenderParam::input(2, gl)))?;
             }
-            player.render = NonNull::new(context);
-            player
-        };
+            #[cfg(test)]
+            DesktopOutput::Software => player.create_renderer(c"sw", None)?,
+            #[cfg(target_os = "windows")]
+            DesktopOutput::Window(_) => (),
+        }
         if !player.command(&[c"loadfile", url]) {
             return Err("Не удалось открыть поток в libmpv.".into());
         }
         Ok(player)
+    }
+
+    #[cfg(any(target_os = "linux", all(test, not(target_os = "android"))))]
+    fn create_renderer(&mut self, name: &CStr, init: Option<RenderParam>) -> Result<(), String> {
+        let mut context = ptr::null_mut();
+        let mut params = [
+            RenderParam {
+                kind: 1,
+                data: name.as_ptr().cast_mut().cast(),
+            },
+            init.unwrap_or(RenderParam::END),
+            RenderParam::END,
+        ];
+        if unsafe {
+            (self.api.mpv_render_context_create)(
+                &mut context,
+                self.handle.as_ptr(),
+                params.as_mut_ptr(),
+            )
+        } < 0
+        {
+            return Err("Не удалось создать видеоповерхность libmpv.".into());
+        }
+        self.render = NonNull::new(context);
+        Ok(())
     }
 
     fn option(&self, name: &CStr, value: &CStr) -> Result<(), String> {
@@ -384,10 +467,9 @@ impl Player {
         let frame_height = self
             .get::<i64>(c"video-out-params/dh", INT64)
             .unwrap_or_default();
-        #[cfg(target_os = "android")]
         let has_frame = frame_width > 0 && frame_height > 0;
-        #[cfg(not(target_os = "android"))]
-        let has_frame = self.render_size.is_some();
+        #[cfg(target_os = "linux")]
+        let has_frame = has_frame && self.render_size.is_some();
         super::Snapshot {
             position,
             duration: self.number(c"duration"),
@@ -404,7 +486,7 @@ impl Player {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(test, not(target_os = "android")))]
     pub(super) fn pixels(&mut self, size: [c_int; 2]) -> Vec<u8> {
         let Some(context) = self.render else {
             return Vec::new();
@@ -449,16 +531,94 @@ impl Player {
         self.render_size = Some(size);
         pixels
     }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn notify_render(&mut self, pending: Arc<AtomicBool>) {
+        unsafe extern "C" fn wake(data: *mut c_void) {
+            let pending = unsafe { &*data.cast::<AtomicBool>() };
+            pending.store(true, Ordering::Release);
+        }
+        if let Some(context) = self.render {
+            unsafe {
+                (self.api.mpv_render_context_set_update_callback)(
+                    context.as_ptr(),
+                    Some(wake),
+                    Arc::as_ptr(&pending).cast_mut().cast(),
+                );
+            }
+            self.render_pending = Some(pending);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn render_gl(&mut self, id: c_int, size: [c_int; 2]) {
+        let Some(context) = self.render else {
+            return;
+        };
+        unsafe { (self.api.mpv_render_context_update)(context.as_ptr()) };
+        let fbo = OpenGlFramebuffer {
+            id,
+            width: size[0],
+            height: size[1],
+            internal_format: 0x8058, // GL_RGBA8, the GtkGLArea texture format.
+        };
+        let flip = 1i32;
+        let block = 0i32;
+        let mut params = [
+            RenderParam::input(3, &fbo),
+            RenderParam::input(4, &flip),
+            RenderParam::input(12, &block),
+            RenderParam::END,
+        ];
+        let rendered = unsafe {
+            (self.api.mpv_render_context_render)(context.as_ptr(), params.as_mut_ptr()) >= 0
+        };
+        if rendered {
+            self.render_size = Some(size);
+        } else {
+            self.failure = Some("Не удалось отрисовать видеокадр OpenGL.".into());
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(super) fn screenshot(&mut self) -> Vec<u8> {
+        let path = std::env::temp_dir().join(format!("yummywatch-{}.jpg", crate::alloha::token()));
+        let Some(file) = path.to_str().and_then(|file| CString::new(file).ok()) else {
+            return Vec::new();
+        };
+        let args = [
+            c"screenshot-to-file".as_ptr(),
+            file.as_ptr(),
+            c"subtitles".as_ptr(),
+            ptr::null(),
+        ];
+        let result = unsafe { (self.api.mpv_command)(self.handle.as_ptr(), args.as_ptr()) };
+        let bytes = if result >= 0 {
+            std::fs::read(&path).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let _ = std::fs::remove_file(path);
+        bytes
+    }
+
+    #[cfg(any(target_os = "linux", all(test, not(target_os = "android"))))]
+    pub(super) fn free_renderer(&mut self) {
+        if let Some(context) = self.render.take() {
+            unsafe { (self.api.mpv_render_context_free)(context.as_ptr()) };
+        }
+        self.render_size = None;
+        #[cfg(target_os = "linux")]
+        {
+            self.render_pending = None;
+        }
+    }
 }
 
 impl Drop for Player {
     fn drop(&mut self) {
-        unsafe {
-            #[cfg(not(target_os = "android"))]
-            if let Some(context) = self.render {
-                (self.api.mpv_render_context_free)(context.as_ptr());
-            }
-            (self.api.mpv_terminate_destroy)(self.handle.as_ptr());
-        }
+        #[cfg(any(target_os = "linux", all(test, not(target_os = "android"))))]
+        self.free_renderer();
+        unsafe { (self.api.mpv_terminate_destroy)(self.handle.as_ptr()) };
     }
 }

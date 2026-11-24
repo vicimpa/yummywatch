@@ -20,7 +20,7 @@
         "minWidth": 720,
         "minHeight": 480,
         "center": true,
-        "backgroundColor": "#222222",
+        "backgroundColor": "#00000000",
         "theme": "Dark",
         "decorations": false,
         "shadow": true

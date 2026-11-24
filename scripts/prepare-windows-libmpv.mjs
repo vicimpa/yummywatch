@@ -36,7 +36,8 @@ if (await exists(checksums)) {
   );
   if (manifest.trim().replaceAll('\r\n', '\n') !== expected.join('\n'))
     throw new Error('Unexpected checksum for locally built Windows libmpv');
-  process.exit(0);
+  if ((await readFile(join(output, 'SOURCE.txt'), 'utf8')).includes('Video renderer: D3D11'))
+    process.exit(0);
 }
 
 if (
@@ -75,6 +76,7 @@ try {
       `Build recipe: https://github.com/mpv-player/mpv/blob/v0.42.0/ci/build-mingw64-full.sh\n` +
       `Binary archive: ${archive}\nSHA-256: ${archiveSha256}\n`
   );
+  await rm(checksums, { force: true });
 } finally {
   await rm(staging, { recursive: true, force: true });
 }

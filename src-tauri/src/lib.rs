@@ -371,9 +371,9 @@ pub fn run() {
                 && payload.event() == tauri::webview::PageLoadEvent::Started
             {
                 keep_awake::clear(webview);
-                #[cfg(desktop)]
+                #[cfg(target_os = "macos")]
                 let _ = webview.run_on_main_thread(native_video::clear);
-                #[cfg(target_os = "android")]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
                 if let Some(window) = webview.get_webview_window("main") {
                     native_video::clear_webview(window);
                 }
@@ -491,12 +491,10 @@ pub fn run() {
             shutdown::window_close_saved,
             #[cfg(any(desktop, target_os = "android"))]
             native_video::native_video,
-            #[cfg(any(target_os = "macos", target_os = "android"))]
+            #[cfg(any(desktop, target_os = "android"))]
             native_video::native_video_frame,
             #[cfg(target_os = "macos")]
-            native_video::native_video_card_frame,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            native_video::native_video_pixels
+            native_video::native_video_card_frame
         ])
         .run(tauri::generate_context!())
         .expect("Не удалось запустить YummyWatch");

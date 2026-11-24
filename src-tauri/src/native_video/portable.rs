@@ -5,6 +5,12 @@ mod android;
 mod mpv;
 #[path = "relay.rs"]
 mod relay;
+#[cfg(target_os = "linux")]
+#[path = "linux_surface.rs"]
+mod surface;
+#[cfg(target_os = "windows")]
+#[path = "windows_surface.rs"]
+mod surface;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -28,9 +34,7 @@ pub enum Request {
     Poll {
         id: u32,
         controls: Controls,
-        #[cfg(target_os = "android")]
         visible: Option<bool>,
-        #[cfg(target_os = "android")]
         geometry: Option<Geometry>,
     },
     Close {
@@ -38,13 +42,28 @@ pub enum Request {
     },
 }
 
-#[cfg(target_os = "android")]
 #[derive(Clone, Copy, Default, Deserialize)]
 pub struct Geometry {
     x: f64,
     y: f64,
     width: f64,
     height: f64,
+}
+
+#[cfg(desktop)]
+impl Geometry {
+    fn bounds(self, width: i32, height: i32) -> [i32; 4] {
+        let pixel =
+            |value: f64, size: i32| (value.clamp(0.0, 1.0) * f64::from(size)).round() as i32;
+        let x = pixel(self.x, width);
+        let y = pixel(self.y, height);
+        [
+            x,
+            y,
+            (pixel(self.x + self.width, width) - x).max(1),
+            (pixel(self.y + self.height, height) - y).max(1),
+        ]
+    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -93,22 +112,37 @@ pub struct Snapshot {
 }
 
 struct Session {
-    player: Mutex<Option<mpv::Player>>,
+    player: Arc<Mutex<Option<mpv::Player>>>,
     position: Mutex<Option<f64>>,
-    #[cfg(target_os = "android")]
     layout: Mutex<(bool, Geometry)>,
 }
 
-#[cfg(target_os = "android")]
-async fn release_surface(window: &WebviewWindow, id: u32, session: Option<Arc<Session>>) {
-    if let Some(session) = session {
-        let _ = spawn_blocking(move || {
-            let player = session.player.lock().unwrap().take();
-            drop(player);
+#[cfg(desktop)]
+async fn on_main<T: Send + 'static>(
+    window: &WebviewWindow,
+    action: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    window
+        .run_on_main_thread(move || {
+            let _ = send.send(action());
         })
-        .await;
-    }
+        .map_err(|error| error.to_string())?;
+    receive.await.map_err(|error| error.to_string())
+}
+
+async fn release_surface(window: &WebviewWindow, id: u32, session: Arc<Session>) {
+    #[cfg(target_os = "linux")]
+    let _ = on_main(window, move || surface::close(id)).await;
+    let _ = spawn_blocking(move || {
+        let player = session.player.lock().unwrap().take();
+        drop(player);
+    })
+    .await;
+    #[cfg(target_os = "android")]
     android::close(window, id).await;
+    #[cfg(target_os = "windows")]
+    let _ = on_main(window, move || surface::close(id)).await;
 }
 
 #[derive(Default)]
@@ -134,15 +168,20 @@ fn drain_players() -> HashMap<u32, Option<Arc<Session>>> {
 
 pub fn clear() {
     let players = drain_players();
+    #[cfg(desktop)]
+    for id in players.keys() {
+        surface::close(*id);
+    }
     spawn_blocking(move || drop(players));
 }
 
-#[cfg(target_os = "android")]
 pub fn clear_webview(window: WebviewWindow) {
     let players = drain_players();
     tauri::async_runtime::spawn(async move {
         for (id, player) in players {
-            release_surface(&window, id, player).await;
+            if let Some(player) = player {
+                release_surface(&window, id, player).await;
+            }
         }
     });
 }
@@ -166,11 +205,6 @@ pub fn available() -> bool {
 #[cfg(target_os = "android")]
 fn api(_: &WebviewWindow) -> Result<&'static mpv::Api, String> {
     mpv::android_api()
-}
-
-#[cfg(target_os = "linux")]
-fn api(_: &WebviewWindow) -> Result<&'static mpv::Api, String> {
-    Ok(&mpv::API)
 }
 
 #[cfg(target_os = "windows")]
@@ -241,47 +275,77 @@ pub async fn native_video(
                     Entry::Occupied(_) => return Err("Видеопоток уже открыт.".into()),
                 }
             }
-            #[cfg(target_os = "android")]
-            let surface = match android::open(&window, id).await {
-                Ok(surface) => surface,
-                Err(error) => {
-                    sessions().lock().unwrap().players.remove(&id);
-                    android::close(&window, id).await;
-                    return Err(error);
+            let session = Arc::new(Session {
+                player: Arc::new(Mutex::new(None)),
+                position: Mutex::new(None),
+                layout: Mutex::default(),
+            });
+            let relayed_hls = relayed && matches!(kind, Kind::Hls);
+            let opened = async {
+                #[cfg(target_os = "linux")]
+                {
+                    let player = session.player.clone();
+                    let (send, receive) = tokio::sync::oneshot::channel();
+                    window
+                        .with_webview(move |view| {
+                            let result = surface::open(id, &view.inner(), &player, |gl| {
+                                mpv::Player::open(
+                                    &mpv::API,
+                                    &url,
+                                    caption,
+                                    start,
+                                    relayed_hls,
+                                    false,
+                                    mpv::DesktopOutput::OpenGl(gl),
+                                )
+                            });
+                            let _ = send.send(result);
+                        })
+                        .map_err(|error| error.to_string())?;
+                    receive.await.map_err(|error| error.to_string())??;
                 }
-            };
-            #[cfg(target_os = "android")]
-            let owner = window.clone();
-            let result = spawn_blocking(move || {
-                let result = api(&window).and_then(|api| {
-                    mpv::Player::open(
-                        api,
-                        &url,
-                        caption,
-                        start,
-                        relayed && matches!(kind, Kind::Hls),
-                        false,
-                        #[cfg(target_os = "android")]
-                        surface,
-                    )
-                });
+                #[cfg(any(target_os = "windows", target_os = "android"))]
+                {
+                    #[cfg(target_os = "android")]
+                    let output = android::open(&window, id).await?;
+                    #[cfg(target_os = "windows")]
+                    let output = {
+                        let parent = window.hwnd().map_err(|error| error.to_string())?.0 as usize;
+                        let host = on_main(&window, move || surface::open(id, parent)).await??;
+                        mpv::DesktopOutput::Window(host)
+                    };
+                    let owner = window.clone();
+                    let player = session.player.clone();
+                    spawn_blocking(move || {
+                        let result = mpv::Player::open(
+                            api(&owner)?,
+                            &url,
+                            caption,
+                            start,
+                            relayed_hls,
+                            false,
+                            output,
+                        )?;
+                        *player.lock().unwrap() = Some(result);
+                        Ok::<(), String>(())
+                    })
+                    .await
+                    .map_err(|error| error.to_string())??;
+                }
+                Ok::<(), String>(())
+            }
+            .await;
+            let result = (|| {
                 let mut sessions = sessions().lock().unwrap();
                 if sessions.generation != generation {
-                    drop(sessions);
                     return Err("Окно видеоплеера закрыто.".into());
                 }
                 let Entry::Occupied(mut slot) = sessions.players.entry(id) else {
-                    drop(sessions);
                     return Err("Видеопоток закрыт.".into());
                 };
-                match result {
-                    Ok(player) => {
-                        slot.insert(Some(Arc::new(Session {
-                            player: Mutex::new(Some(player)),
-                            position: Mutex::new(None),
-                            #[cfg(target_os = "android")]
-                            layout: Mutex::default(),
-                        })));
+                match opened {
+                    Ok(()) => {
+                        slot.insert(Some(session.clone()));
                         Ok(None)
                     }
                     Err(error) => {
@@ -289,26 +353,20 @@ pub async fn native_video(
                         Err(error)
                     }
                 }
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-            #[cfg(target_os = "android")]
+            })();
             if result.is_err() {
-                android::close(&owner, id).await;
+                release_surface(&window, id, session).await;
             }
             result
         }
         Request::Poll {
             id,
             controls,
-            #[cfg(target_os = "android")]
             visible,
-            #[cfg(target_os = "android")]
             geometry,
         } => {
             let session = session(id).ok_or("Видеопоток закрыт.")?;
-            #[cfg(target_os = "android")]
-            if visible.is_some() || geometry.is_some() {
+            if cfg!(desktop) || visible.is_some() || geometry.is_some() {
                 let (visible, geometry) = {
                     let mut layout = session.layout.lock().unwrap();
                     if let Some(visible) = visible {
@@ -319,7 +377,10 @@ pub async fn native_video(
                     }
                     *layout
                 };
+                #[cfg(target_os = "android")]
                 android::layout(&window, id, visible, geometry).await?;
+                #[cfg(desktop)]
+                on_main(&window, move || surface::layout(id, visible, geometry)).await?;
             }
             spawn_blocking(move || {
                 let mut player = session.player.lock().unwrap();
@@ -333,11 +394,10 @@ pub async fn native_video(
             .map_err(|error| error.to_string())
         }
         Request::Close { id } => {
-            let player = sessions().lock().unwrap().players.remove(&id);
-            #[cfg(not(target_os = "android"))]
-            spawn_blocking(move || drop(player));
-            #[cfg(target_os = "android")]
-            release_surface(&window, id, player.flatten()).await;
+            let session = sessions().lock().unwrap().players.remove(&id).flatten();
+            if let Some(session) = session {
+                release_surface(&window, id, session).await;
+            }
             Ok(None)
         }
     }
@@ -365,34 +425,37 @@ pub async fn native_video_frame(
     frame.map(Response::new)
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 #[tauri::command]
-pub async fn native_video_pixels(
+pub async fn native_video_frame(
     window: WebviewWindow,
     id: u32,
-    width: i32,
-    height: i32,
+    close: bool,
 ) -> Result<Response, String> {
     if window.label() != "main" {
         return Err("Неизвестное окно.".into());
     }
-    if !(16..=1920).contains(&width) || width % 16 != 0 || !(1..=1080).contains(&height) {
-        return Err("Недопустимый размер видеокадра.".into());
-    }
-    let pixels = match session(id) {
-        Some(session) => spawn_blocking(move || {
-            session
-                .player
-                .lock()
-                .unwrap()
-                .as_mut()
-                .map_or_else(Vec::new, |player| player.pixels([width, height]))
-        })
-        .await
-        .map_err(|error| error.to_string())?,
-        None => Vec::new(),
+    let session = if close {
+        sessions().lock().unwrap().players.remove(&id).flatten()
+    } else {
+        session(id)
     };
-    Ok(Response::new(pixels))
+    let Some(session) = session else {
+        return Ok(Response::new(Vec::new()));
+    };
+    let player = session.player.clone();
+    let frame = spawn_blocking(move || {
+        player
+            .lock()
+            .unwrap()
+            .as_mut()
+            .map_or_else(Vec::new, mpv::Player::screenshot)
+    })
+    .await;
+    if close {
+        release_surface(&window, id, session).await;
+    }
+    frame.map(Response::new).map_err(|error| error.to_string())
 }
 
 #[cfg(all(test, not(target_os = "android")))]
@@ -418,7 +481,16 @@ mod tests {
         // The H.264 picture changes from dark to bright after the first second.
         std::fs::write(&file, include_bytes!("fixtures/playback.mp4")).unwrap();
         let path = CString::new(file.to_str().unwrap()).unwrap();
-        let mut player = mpv::Player::open(api, &path, None, 0.0, false, true).unwrap();
+        let mut player = mpv::Player::open(
+            api,
+            &path,
+            None,
+            0.0,
+            false,
+            true,
+            mpv::DesktopOutput::Software,
+        )
+        .unwrap();
 
         let check_frame =
             |player: &mut mpv::Player, position: f64, brightness: std::ops::Range<u8>| {
@@ -454,6 +526,7 @@ mod tests {
             ..Default::default()
         });
         check_frame(&mut player, 2.0, 145..240);
+        assert!(player.screenshot().starts_with(&[0xff, 0xd8]));
         drop(player);
         std::fs::remove_file(file).unwrap();
     }

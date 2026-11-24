@@ -1,4 +1,19 @@
 {
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "YummyWatch",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 720,
+        "minHeight": 480,
+        "center": true,
+        "backgroundColor": "#00000000",
+        "theme": "Dark"
+      }
+    ]
+  },
   "bundle": {
     "linux": {
       "appimage": { "bundleMediaFramework": true },

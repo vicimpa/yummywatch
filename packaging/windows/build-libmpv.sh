@@ -31,6 +31,11 @@ source_archive harfbuzz-12.1.0.tar.gz https://codeload.github.com/harfbuzz/harfb
 source_archive fast_float-8.1.0.tar.gz https://codeload.github.com/fastfloat/fast_float/tar.gz/refs/tags/v8.1.0 4bfabb5979716995090ce68dce83f88f99629bc17ae280eae79311c5340143e1
 source_archive vulkan-headers-1.4.321.tar.gz https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/refs/tags/v1.4.321 7c1874f9186d9e7d5245e279cdccaa77a66ed8f52871b428630aeb771dc7623c
 source_archive libxml2-2.15.4.tar.xz https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.4.tar.xz 98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821
+source_archive shaderc-2025.5.tar.gz https://codeload.github.com/google/shaderc/tar.gz/refs/tags/v2025.5 fca5041b1fdea6daba167b63e04e55e5059fab40828342126169336643445447
+source_archive glslang-shaderc.tar.gz https://codeload.github.com/KhronosGroup/glslang/tar.gz/7a47e2531cb334982b2a2dd8513dca0a3de4373d 272d2725b140e09e85b96eecdc59c2e00c1a14cda2301767e1bf3c363a44b931
+source_archive spirv-headers-shaderc.tar.gz https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/b824a462d4256d720bebb40e78b9eb8f78bbb305 c693867f10a7760ef1bcf85419d51783586768cc2c601d03841bc6a8b2554b9c
+source_archive spirv-tools-shaderc.tar.gz https://codeload.github.com/KhronosGroup/SPIRV-Tools/tar.gz/262bdab48146c937467f826699a40da0fdfc0f1a 8f830936b057003be77e90d37068ff6066eb87a1bab0033f8f2f5feaa966ce56
+source_archive spirv-cross-1.4.321.tar.gz https://codeload.github.com/KhronosGroup/SPIRV-Cross/tar.gz/refs/tags/vulkan-sdk-1.4.321.0 6037555620c27105bf1d4068a6eeb4b0d7953630d556a1ca9799dfe06fd2fb68
 
 cp -R "$work/vulkan-headers-1.4.321"/. "$work/libplacebo-7.387.0/3rdparty/Vulkan-Headers/"
 cp -R "$work/fast_float-8.1.0"/. "$work/libplacebo-7.387.0/3rdparty/fast_float/"
@@ -79,6 +84,7 @@ build libplacebo-7.387.0 static -Ddemos=false
 cat > "$work/cross.cmake" <<CONFIG
 set(CMAKE_SYSTEM_NAME Windows)
 set(CMAKE_C_COMPILER $target-gcc-posix)
+set(CMAKE_CXX_COMPILER $target-g++-posix)
 set(CMAKE_RC_COMPILER $target-windres)
 CONFIG
 cmake -S "$work/libxml2-2.15.4" -B "$work/libxml2-2.15.4/build" -G Ninja \
@@ -87,6 +93,34 @@ cmake -S "$work/libxml2-2.15.4" -B "$work/libxml2-2.15.4/build" -G Ninja \
   -DLIBXML2_WITH_ICONV=OFF -DLIBXML2_WITH_ZLIB=OFF -DLIBXML2_WITH_PYTHON=OFF \
   -DLIBXML2_WITH_PROGRAMS=OFF -DLIBXML2_WITH_TESTS=OFF
 cmake --build "$work/libxml2-2.15.4/build" --target install -j "$jobs"
+
+# Keep the D3D11 shader dependencies static so the installer ships one DLL.
+shaderc="$work/shaderc-2025.5"
+cmake -S "$shaderc" -B "$shaderc/build" -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE="$work/cross.cmake" -DCMAKE_INSTALL_PREFIX="$prefix" \
+  -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=MinSizeRel \
+  -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON -DSPIRV_SKIP_EXECUTABLES=ON \
+  -DENABLE_GLSLANG_BINARIES=OFF \
+  -DSHADERC_GLSLANG_DIR="$work/glslang-shaderc" \
+  -DSHADERC_SPIRV_HEADERS_DIR="$work/spirv-headers-shaderc" \
+  -DSHADERC_SPIRV_TOOLS_DIR="$work/spirv-tools-shaderc"
+cmake --build "$shaderc/build" --target shaderc_combined shaderc_combined-pkg-config -j "$jobs"
+cp -R "$shaderc/libshaderc/include/shaderc" "$prefix/include/"
+cp "$shaderc/build/libshaderc/libshaderc_combined.a" "$prefix/lib/"
+cp "$shaderc/build/shaderc_combined.pc" "$prefix/lib/pkgconfig/"
+
+spirv_cross="$work/spirv-cross-1.4.321"
+cmake -S "$spirv_cross" -B "$spirv_cross/build" -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE="$work/cross.cmake" -DCMAKE_INSTALL_PREFIX="$prefix" \
+  -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=MinSizeRel \
+  -DSPIRV_CROSS_SHARED=OFF -DSPIRV_CROSS_CLI=OFF -DSPIRV_CROSS_ENABLE_TESTS=OFF \
+  -DSPIRV_CROSS_ENABLE_CPP=OFF -DSPIRV_CROSS_ENABLE_MSL=OFF \
+  -DSPIRV_CROSS_ENABLE_REFLECT=OFF -DSPIRV_CROSS_ENABLE_UTIL=OFF
+cmake --build "$spirv_cross/build" -j "$jobs"
+cmake --install "$spirv_cross/build"
+# The installed pkg-config file lists only the C API archive.
+sed -i '/^Libs:/ s/$/ -lspirv-cross-hlsl -lspirv-cross-glsl -lspirv-cross-core/' \
+  "$prefix/lib/pkgconfig/spirv-cross-c.pc"
 
 (
   cd "$work/ffmpeg-8.1"
@@ -102,13 +136,12 @@ cmake --build "$work/libxml2-2.15.4/build" --target install -j "$jobs"
     --enable-parser=h264,hevc,av1,vp8,vp9,mpeg4video,aac,aac_latm,ac3,mpegaudio,opus \
     --enable-hwaccel=h264_d3d11va,h264_d3d11va2,hevc_d3d11va,hevc_d3d11va2,av1_d3d11va,av1_d3d11va2,vp9_d3d11va,vp9_d3d11va2 \
     --enable-filter=buffer,buffersink,abuffer,abuffersink,format,aformat,aresample,atempo,scale,volume \
-    --enable-muxer=spdif
+    --enable-encoder=mjpeg --enable-muxer=spdif
   make -j "$jobs"
   make install
 )
 
-# Include the D3D helpers for hardware decoding with the software renderer.
-# libplacebo also uses C++ internally, so link the MinGW C++ runtime statically.
+# Use the static shader libraries and link the MinGW C++ runtime statically.
 python3 - "$work/mpv-0.42.0/meson.build" <<'PYTHON'
 from pathlib import Path
 import sys
@@ -116,8 +149,8 @@ import sys
 path = Path(sys.argv[1])
 source = path.read_text()
 patches = {
-    "if features['d3d11'] or features['egl-angle-win32'] or (features['vulkan'] and win32)":
-        "if features['d3d11'] or features['egl-angle-win32'] or (features['vulkan'] and win32) or get_option('d3d-hwaccel').enabled()",
+    "dependency('shaderc',": "dependency('shaderc_combined',",
+    "dependency('spirv-cross-c-shared',": "dependency('spirv-cross-c',",
     "cc = meson.get_compiler('c')":
         "cc = meson.get_compiler('c')\ndependencies += cc.find_library('stdc++', static: true)",
 }
@@ -130,12 +163,14 @@ PYTHON
 
 build mpv-0.42.0 shared -Dgpl=false -Dcplayer=false -Dlibmpv=true \
   -Dbuild-date=false -Dlua=disabled -Dwasapi=enabled -Dd3d-hwaccel=enabled \
-  -Dgl=disabled -Dwin32-threads=enabled -Dvector=enabled
+  -Dgl=disabled -Dd3d11=enabled -Dshaderc=enabled -Dspirv-cross=enabled \
+  -Dwin32-threads=enabled -Dvector=enabled
 
 cp "$prefix/bin/libmpv-2.dll" "$output/"
 cp "$work/mpv-0.42.0/LICENSE.LGPL" "$output/"
 {
   echo 'YummyWatch Windows x64 LGPL libmpv build'
+  echo 'Video renderer: D3D11'
   echo 'Recipe: https://github.com/vicimpa/yummywatch/blob/main/packaging/windows/build-libmpv.sh'
   cat "$sources"
   echo
@@ -145,7 +180,9 @@ cp "$work/mpv-0.42.0/LICENSE.LGPL" "$output/"
     mpv-0.42.0/Copyright ffmpeg-8.1/COPYING.LGPLv2.1 libplacebo-7.387.0/LICENSE \
     libass-0.17.4/COPYING freetype-2.14.1/docs/FTL.TXT fribidi-1.0.16/COPYING \
     harfbuzz-12.1.0/COPYING fast_float-8.1.0/LICENSE-MIT \
-    vulkan-headers-1.4.321/LICENSE.md libxml2-2.15.4/Copyright; do
+    vulkan-headers-1.4.321/LICENSE.md libxml2-2.15.4/Copyright shaderc-2025.5/LICENSE \
+    glslang-shaderc/LICENSE.txt spirv-headers-shaderc/LICENSE spirv-tools-shaderc/LICENSE \
+    spirv-cross-1.4.321/LICENSE; do
     echo
     echo "$license"
     cat "$work/$license"

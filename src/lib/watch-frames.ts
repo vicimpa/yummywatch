@@ -14,26 +14,33 @@ export function watchFrameKey(animeId: number, episode: string | undefined, acco
 export const cachedWatchFrame = (key?: string) =>
   key && canCacheImages() ? cachedImage(key, 'frame') : undefined;
 
-function videoFrame(video: PlaybackMedia): Promise<Blob | undefined> {
-  if (!(video instanceof HTMLVideoElement) || !video.videoWidth || !video.videoHeight)
-    return Promise.resolve(undefined);
-
+export function encodeWatchFrame(
+  source: CanvasImageSource,
+  width: number,
+  height: number
+): Promise<Blob | undefined> {
   const canvas = document.createElement('canvas');
-  const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
-  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+  const scale = Math.min(1, 640 / Math.max(width, height));
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
 
   return new Promise(resolve => {
     try {
       const context = canvas.getContext('2d');
       if (!context) return resolve(undefined);
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      context.drawImage(source, 0, 0, canvas.width, canvas.height);
       canvas.toBlob(blob => resolve(blob || undefined), 'image/jpeg', 0.76);
     } catch {
       // The source may allow playback without granting pixel access.
       resolve(undefined);
     }
   });
+}
+
+function videoFrame(video: PlaybackMedia): Promise<Blob | undefined> {
+  if (!(video instanceof HTMLVideoElement) || !video.videoWidth || !video.videoHeight)
+    return Promise.resolve(undefined);
+  return encodeWatchFrame(video, video.videoWidth, video.videoHeight);
 }
 
 export function trackWatchFrames(video: PlaybackMedia, activeKey: () => string | undefined) {
