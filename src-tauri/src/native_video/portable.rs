@@ -131,14 +131,16 @@ async fn on_main<T: Send + 'static>(
     receive.await.map_err(|error| error.to_string())
 }
 
-async fn release_surface(window: &WebviewWindow, id: u32, session: Arc<Session>) {
+async fn release_surface(window: &WebviewWindow, id: u32, session: Option<Arc<Session>>) {
     #[cfg(target_os = "linux")]
     let _ = on_main(window, move || surface::close(id)).await;
-    let _ = spawn_blocking(move || {
-        let player = session.player.lock().unwrap().take();
-        drop(player);
-    })
-    .await;
+    if let Some(session) = session {
+        let _ = spawn_blocking(move || {
+            let player = session.player.lock().unwrap().take();
+            drop(player);
+        })
+        .await;
+    }
     #[cfg(target_os = "android")]
     android::close(window, id).await;
     #[cfg(target_os = "windows")]
@@ -179,9 +181,7 @@ pub fn clear_webview(window: WebviewWindow) {
     let players = drain_players();
     tauri::async_runtime::spawn(async move {
         for (id, player) in players {
-            if let Some(player) = player {
-                release_surface(&window, id, player).await;
-            }
+            release_surface(&window, id, player).await;
         }
     });
 }
@@ -355,7 +355,7 @@ pub async fn native_video(
                 }
             })();
             if result.is_err() {
-                release_surface(&window, id, session).await;
+                release_surface(&window, id, Some(session)).await;
             }
             result
         }
@@ -395,9 +395,7 @@ pub async fn native_video(
         }
         Request::Close { id } => {
             let session = sessions().lock().unwrap().players.remove(&id).flatten();
-            if let Some(session) = session {
-                release_surface(&window, id, session).await;
-            }
+            release_surface(&window, id, session).await;
             Ok(None)
         }
     }
@@ -453,7 +451,7 @@ pub async fn native_video_frame(
     })
     .await;
     if close {
-        release_surface(&window, id, session).await;
+        release_surface(&window, id, Some(session)).await;
     }
     frame.map(Response::new).map_err(|error| error.to_string())
 }
