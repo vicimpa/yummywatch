@@ -357,8 +357,8 @@ impl Player {
             (self.api.mpv_set_option_string)(self.handle.as_ptr(), name.as_ptr(), value.as_ptr())
         };
         // The bundled LGPL build can omit script support entirely.
-        let absent_script_option =
-            result == OPTION_NOT_FOUND && (name == c"ytdl" || name == c"load-scripts");
+        let absent_script_option = result == OPTION_NOT_FOUND
+            && (name == c"ytdl" || name == c"load-scripts" || name == c"osc");
         (result >= 0 || absent_script_option)
             .then_some(())
             .ok_or_else(|| {
