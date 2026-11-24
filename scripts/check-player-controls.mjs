@@ -79,10 +79,25 @@ for (const engine of [chromium, webkit]) {
         'rgb(255, 205, 189)',
         `${key} shows the shared keyboard focus in the player`
       );
-      await page.waitForTimeout(3200);
+      await page.waitForSelector('.video-controls.is-hidden', { state: 'attached', timeout: 6000 });
       assert(
-        await page.locator('.video-controls.is-visible').count(),
-        'A keyboard-focused control stays visible'
+        await page.locator('.video-controls:focus').count(),
+        'Idle focus returns to the player'
+      );
+      const before = await page.evaluate(() => document.querySelector('video').currentTime);
+      await page.keyboard.press('ArrowRight');
+      await page.waitForSelector('[data-tv-timeline]:focus', { state: 'attached', timeout: 2000 });
+      await page.keyboard.press('ArrowRight');
+      assert.equal(
+        await page.evaluate(() => document.querySelector('video').currentTime),
+        before + 20
+      );
+      await page.locator('.video-controls').focus();
+      await page.keyboard.press('ArrowLeft');
+      await page.waitForSelector('[data-tv-timeline]:focus', { state: 'attached', timeout: 2000 });
+      assert.equal(
+        await page.evaluate(() => document.querySelector('video').currentTime),
+        before + 10
       );
       await page.mouse.move(key === 'ArrowUp' ? 231 : 241, 131);
       await page.waitForSelector('.video-controls.is-hidden', { state: 'attached', timeout: 6000 });

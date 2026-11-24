@@ -9,6 +9,7 @@ export const AUTO_ACTION_DELAY_MS = 5000;
 export type TAutoActionCountdownProps = {
   label: string;
   background?: boolean;
+  videoClock?: { remainingMs: number; playing: boolean };
   onComplete: () => void;
   onCancel: () => void;
   onNow: () => void;
@@ -17,11 +18,12 @@ export type TAutoActionCountdownProps = {
 export const AutoActionCountdown: FC<TAutoActionCountdownProps> = ({
   label,
   background = false,
+  videoClock,
   onComplete,
   onCancel,
   onNow,
 }) => {
-  const [seconds, setSeconds] = useState(AUTO_ACTION_DELAY_MS / 1000),
+  const [wallSeconds, setWallSeconds] = useState(AUTO_ACTION_DELAY_MS / 1000),
     done = useRef(false),
     timer = useRef<ReturnType<typeof setInterval>>();
   const callbacks = useRef({ onComplete, onCancel, onNow });
@@ -42,18 +44,27 @@ export const AutoActionCountdown: FC<TAutoActionCountdownProps> = ({
     callbacks.current[action]();
   }, []);
 
+  const usesVideoClock = videoClock !== undefined;
+  const skipDue = videoClock?.playing && videoClock.remainingMs <= 0;
+  const seconds = videoClock ? Math.max(0, Math.ceil(videoClock.remainingMs / 1000)) : wallSeconds;
+
   useLayoutEffect(() => {
+    if (usesVideoClock) return;
     const deadline = performance.now() + AUTO_ACTION_DELAY_MS;
 
     timer.current = setInterval(() => {
       const left = deadline - performance.now();
 
       if (left <= 0) finish('onComplete');
-      else setSeconds(Math.ceil(left / 1000));
+      else setWallSeconds(Math.ceil(left / 1000));
     }, 100);
 
     return () => clearInterval(timer.current);
-  }, []);
+  }, [usesVideoClock, finish]);
+
+  useLayoutEffect(() => {
+    if (skipDue) finish('onComplete');
+  }, [skipDue, finish]);
 
   useLayoutEffect(() => {
     if (background) return;

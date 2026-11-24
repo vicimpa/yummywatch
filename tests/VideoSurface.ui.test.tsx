@@ -449,6 +449,77 @@ it('keeps a newer Play request while a poll is in flight and then follows the na
   expect(screen.getByRole('button', { name: 'Воспроизвести' })).toBeTruthy();
 });
 
+it.each([
+  ['ArrowRight', 10],
+  ['ArrowLeft', -10],
+] as const)(
+  'accumulates held %s seeks while native snapshots are catching up',
+  async (key, step) => {
+    const snapshot = {
+      ready: true,
+      seeking: false,
+      buffering: false,
+      ended: false,
+      failure: false,
+      paused: false,
+      position: 100,
+      duration: 200,
+      buffered: 120,
+    };
+    const requested: number[] = [];
+    const invoke = vi.fn(async (command, { request }) => {
+      if (command !== 'native_video' || request.action !== 'poll') return null;
+      if (request.controls.seconds !== undefined) requested.push(request.controls.seconds);
+      return { ...snapshot };
+    });
+    vi.stubGlobal('isTauri', true);
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+    document.documentElement.dataset.desktop = 'macos';
+    const { container } = render(<Harness />);
+    const poll = (ms = 80) =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    await poll();
+    const controls = container.querySelector<HTMLElement>('.video-controls')!;
+    const timeline = screen.getByRole<HTMLInputElement>('slider', {
+      name: 'Позиция воспроизведения',
+    });
+    controls.focus();
+    fireEvent.keyDown(controls, { key });
+    expect(document.activeElement).toBe(timeline);
+    expect(timeline.valueAsNumber).toBe(100 + step);
+
+    await poll(); // libmpv can still report the old position with seeking=false.
+    expect(timeline.valueAsNumber).toBe(100 + step);
+    fireEvent.keyDown(timeline, { key, repeat: true });
+    snapshot.position = 100 + step; // completion of the first seek arrives late
+    await poll();
+    expect(timeline.valueAsNumber).toBe(100 + 2 * step);
+    fireEvent.keyDown(timeline, { key, repeat: true });
+    snapshot.position = 100 + 2 * step;
+    await poll();
+    expect(requested).toEqual([100 + step, 100 + 2 * step, 100 + 3 * step]);
+    expect(timeline.valueAsNumber).toBe(100 + 3 * step);
+
+    snapshot.position = 100 + 3 * step;
+    await poll();
+    snapshot.position += 1;
+    await poll();
+    expect(timeline.valueAsNumber).toBe(101 + 3 * step);
+
+    fireEvent.keyDown(timeline, { key });
+    snapshot.seeking = true;
+    await poll(1600);
+    expect(timeline.valueAsNumber).toBe(101 + 4 * step);
+    snapshot.seeking = false;
+    await poll();
+    expect(timeline.valueAsNumber).toBe(101 + 4 * step);
+    await poll(1600);
+    expect(timeline.valueAsNumber).toBe(101 + 3 * step);
+  }
+);
+
 describe('unresponsive media sources', () => {
   it('renews an opted-in source on play after a long pause, without renewing during the pause', () => {
     const resume = vi.fn(() => true);
@@ -725,50 +796,77 @@ describe('completion and cancellable automatic actions', () => {
     countdown();
     expect(next).toHaveBeenCalledOnce();
   });
-  it('gives an automatic opening skip five seconds, supports cancellation, and keeps manual skipping instant', () => {
+  it('counts three seconds of video for the opening skip instead of elapsed wall time', () => {
     const { container } = render(
       <Harness autoOpening skips={{ opening: { time: 10, length: 20 } }} />
     );
     const media = container.querySelector('video')!;
 
     playing(media, 15);
-    act(() => {
-      vi.advanceTimersByTime(2000);
-    });
+    countdown();
     expect(media.currentTime).toBe(15);
+    expect(screen.getByRole('group', { name: 'Пропуск опенинга' }).textContent).toContain('3 с');
+    media.currentTime = 17;
+    fireEvent.timeUpdate(media);
+    expect(media.currentTime).toBe(17);
+    expect(screen.getByRole('group', { name: 'Пропуск опенинга' }).textContent).toContain('1 с');
+    media.currentTime = 18;
+    fireEvent.timeUpdate(media);
+    expect(media.currentTime).toBe(30);
+  });
+  it('supports cancelling the opening countdown and keeps manual skipping instant', () => {
+    const { container } = render(
+      <Harness autoOpening skips={{ opening: { time: 10, length: 20 } }} />
+    );
+    const media = container.querySelector('video')!;
+
+    playing(media, 15);
+    media.currentTime = 17;
+    fireEvent.timeUpdate(media);
     fireEvent.click(screen.getByRole('button', { name: 'Отмена' }));
     countdown();
+    media.currentTime = 20;
     fireEvent.timeUpdate(media);
-    expect(media.currentTime).toBe(15);
+    expect(media.currentTime).toBe(20);
     expect(screen.queryByRole('group', { name: 'Пропуск опенинга' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Пропустить опенинг' }));
     expect(media.currentTime).toBe(30);
+    expect(document.activeElement).toBe(
+      screen.getByRole('slider', { name: 'Позиция воспроизведения' })
+    );
   });
-  it('never skips on pause or after seeking away and starts a fresh timer on resumed playback', () => {
+  it('preserves elapsed video time through pause and buffering and restarts after seeking', () => {
     const { container } = render(
       <Harness autoOpening skips={{ opening: { time: 10, length: 20 } }} />
     );
     const media = container.querySelector('video')!;
 
     playing(media, 15);
-    act(() => {
-      vi.advanceTimersByTime(2000);
-    });
+    media.currentTime = 16;
+    fireEvent.timeUpdate(media);
     Object.defineProperty(media, 'paused', { value: true, writable: true, configurable: true });
     fireEvent.pause(media);
     countdown();
-    expect(media.currentTime).toBe(15);
+    expect(media.currentTime).toBe(16);
+    expect(screen.getByRole('group', { name: 'Пропуск опенинга' }).textContent).toContain('2 с');
     Object.defineProperty(media, 'paused', { value: false, writable: true, configurable: true });
     fireEvent.playing(media);
-    media.currentTime = 40;
+    fireEvent.waiting(media);
+    countdown();
+    expect(media.currentTime).toBe(16);
+    expect(screen.getByRole('group', { name: 'Пропуск опенинга' }).textContent).toContain('2 с');
+    fireEvent.playing(media);
+    media.currentTime = 17;
+    fireEvent.timeUpdate(media);
+    expect(screen.getByRole('group', { name: 'Пропуск опенинга' }).textContent).toContain('1 с');
+
+    media.currentTime = 22;
     fireEvent.seeking(media);
     fireEvent.seeked(media);
-    countdown();
-    expect(media.currentTime).toBe(40);
-    media.currentTime = 15;
-    fireEvent.seeked(media);
-    fireEvent.playing(media);
-    countdown();
+    expect(media.currentTime).toBe(22);
+    expect(screen.getByRole('group', { name: 'Пропуск опенинга' }).textContent).toContain('3 с');
+    media.currentTime = 25;
+    fireEvent.timeUpdate(media);
     expect(media.currentTime).toBe(30);
   });
   it('preserves post-credit scenes and starts the next timer only at the real end', () => {
@@ -779,7 +877,8 @@ describe('completion and cancellable automatic actions', () => {
     const media = container.querySelector('video')!;
 
     playing(media, 85);
-    countdown();
+    media.currentTime = 88;
+    fireEvent.timeUpdate(media);
     expect(media.currentTime).toBe(90);
     expect(next).not.toHaveBeenCalled();
     expect(screen.queryByRole('group', { name: 'Следующая серия' })).toBeNull();

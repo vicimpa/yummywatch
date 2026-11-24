@@ -30,6 +30,8 @@ const physical: Partial<Record<string, string>> = {
 };
 
 const keyboardMode = () => document.documentElement.dataset.inputMode === 'keyboard';
+const timelineControl = (root: HTMLElement | null) =>
+  root?.querySelector<HTMLInputElement>('[data-tv-timeline]:not(:disabled)');
 
 export const CONTROLS_IDLE_MS = 3000;
 
@@ -117,15 +119,15 @@ export const VideoControls: FC<TVideoControlsProps> = ({
     menuButton = useRef<HTMLButtonElement>(null);
 
   const wake = useCallback(() => {
-    if (tv) return;
     setVisible(true);
     setActivity(value => value + 1);
-  }, [tv]);
+  }, []);
 
   useEffect(() => {
     if (tv) return;
     const move = (event: PointerEvent) => {
-      if (event.pointerType === 'touch') return;
+      if (event.pointerType === 'touch' || keyboardMode()) return;
+      if (event.type === 'pointerover' && keyboard.current) return;
       if (event.type !== 'pointerover') {
         keyboard.current = false;
         if (tvEpisodeFocus) tvEpisodeFocus.current = null;
@@ -175,15 +177,30 @@ export const VideoControls: FC<TVideoControlsProps> = ({
     };
   }, [frame, tv, tvEpisodeFocus, wake]);
 
-  const seek = useCallback(
-    (time: number, showControls = true) => {
-      const video = media.current;
+  const focusTimeline = useCallback(() => {
+    if (tvEpisodeFocus) tvEpisodeFocus.current = null;
+    const timeline = visible && timelineControl(controls.current);
+    if (timeline) {
+      if (document.activeElement !== timeline) focusTarget(timeline);
+    } else tvEntry.current = 'timeline';
+    wake();
+  }, [tvEpisodeFocus, visible, wake]);
 
-      if (video && Number.isFinite(video.duration))
-        video.currentTime = Math.max(0, Math.min(video.duration, time));
-      if (showControls) wake();
+  useEffect(() => {
+    const video = media.current;
+    video?.addEventListener('yumiwatch:manual-seek', focusTimeline);
+    return () => video?.removeEventListener('yumiwatch:manual-seek', focusTimeline);
+  }, [media, mediaVersion, focusTimeline]);
+
+  const seek = useCallback(
+    (time: number) => {
+      const video = media.current;
+      if (failed || loading || !video || !Number.isFinite(video.duration) || video.duration <= 0)
+        return;
+      video.currentTime = Math.max(0, Math.min(video.duration, time));
+      focusTimeline();
     },
-    [media, wake]
+    [failed, loading, media, focusTimeline]
   );
 
   const togglePlay = useCallback(
@@ -227,7 +244,7 @@ export const VideoControls: FC<TVideoControlsProps> = ({
       const video = media.current;
       if (!video || loading || failed) return;
       if (action === 'toggle' || (action === 'play' && (video.paused || mediaAtEnd(video))))
-        togglePlay();
+        togglePlay(false);
       else if (action === 'pause' && !video.paused) video.pause();
       else if (action === 'forward' || action === 'rewind')
         seek(video.currentTime + (action === 'forward' ? 10 : -10));
@@ -236,12 +253,16 @@ export const VideoControls: FC<TVideoControlsProps> = ({
     return () => window.removeEventListener('yumiwatch:tv-media', transport);
   }, [tv, failed, loading, media, togglePlay, seek, changeEpisode, previous, next]);
 
-  const { fullscreen, error: fullError, toggle: toggleFullscreen } = useFullscreen(frame, wake);
+  const {
+    fullscreen,
+    error: fullError,
+    toggle: toggleFullscreen,
+  } = useFullscreen(frame, tv ? undefined : wake);
 
   const surfaceClick = useCallback(
     (event: MouseEvent) => {
       if (tv) {
-        togglePlay();
+        togglePlay(false);
         return;
       }
       clearTimeout(surfaceClickTimer.current);
@@ -303,25 +324,47 @@ export const VideoControls: FC<TVideoControlsProps> = ({
   }, []);
 
   useEffect(() => {
-    if (tv) return;
-    if (paused || loading || failed || buffering || menu || dragging || pointerOnControls) {
-      if (!keyboardMode() || menu || dragging || pointerOnControls) setVisible(true);
+    const pointerMode = !tv && !keyboard.current && !keyboardMode();
+    if (
+      paused ||
+      loading ||
+      failed ||
+      buffering ||
+      menu ||
+      dragging ||
+      (pointerMode && pointerOnControls)
+    ) {
+      if (pointerMode || menu || dragging) setVisible(true);
 
       return;
     }
+    if (!visible) return;
 
     const timer = setTimeout(() => {
-      // Keep the toolbar available while the keyboard is navigating its controls.
+      const root = controls.current;
       const active = document.activeElement;
-      if (active !== controls.current && controls.current?.contains(active)) {
-        if (keyboard.current) return;
-        active instanceof HTMLElement && active.blur();
+      if (active !== root && root?.contains(active)) {
+        if (tv || keyboard.current || keyboardMode()) root.focus({ preventScroll: true });
+        else if (active instanceof HTMLElement) active.blur();
       }
+      if (tvEpisodeFocus) tvEpisodeFocus.current = null;
       setVisible(false);
     }, CONTROLS_IDLE_MS);
 
     return () => clearTimeout(timer);
-  }, [tv, paused, loading, failed, buffering, menu, dragging, pointerOnControls, activity]);
+  }, [
+    tv,
+    paused,
+    loading,
+    failed,
+    buffering,
+    menu,
+    dragging,
+    pointerOnControls,
+    activity,
+    visible,
+    tvEpisodeFocus,
+  ]);
 
   useEffect(() => {
     onVisibility(visible);
@@ -363,23 +406,12 @@ export const VideoControls: FC<TVideoControlsProps> = ({
   }, [menu]);
 
   useLayoutEffect(() => {
-    const root = controls.current!;
-    const dismiss = () => {
-      if (tvEpisodeFocus) tvEpisodeFocus.current = null;
-      root.focus({ preventScroll: true });
-      setVisible(false);
-    };
-    root.addEventListener('yumiwatch:tv-dismiss', dismiss);
-    return () => root.removeEventListener('yumiwatch:tv-dismiss', dismiss);
-  }, [tvEpisodeFocus]);
-
-  useLayoutEffect(() => {
     if (!visible || failed) return;
     const root = controls.current;
     const pending =
       document.documentElement.dataset.inputMode !== 'pointer' && tvEpisodeFocus?.current;
     if (pending) {
-      // The source may replace the player again. Keep the toolbar intent until Back.
+      // The source may replace the player again before the controls hide.
       const target =
         root?.querySelector<HTMLElement>(`[data-tv-episode-control="${pending}"]:not(:disabled)`) ||
         root?.querySelector<HTMLElement>(
@@ -390,9 +422,7 @@ export const VideoControls: FC<TVideoControlsProps> = ({
     }
     if (!tvEntry.current) return;
     const skip = tvEntry.current === 'skip' ? skipButton.current : null;
-    const timeline =
-      tvEntry.current !== 'play' &&
-      root?.querySelector<HTMLElement>('.video-timeline input:not(:disabled)');
+    const timeline = tvEntry.current !== 'play' && timelineControl(root);
     const target = skip || timeline || root?.querySelector<HTMLElement>('.video-toolbar button');
     tvEntry.current = undefined;
     if (target) focusTarget(target);
@@ -405,8 +435,9 @@ export const VideoControls: FC<TVideoControlsProps> = ({
         if (!event.repeat && !loading) togglePlay(false);
       } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
         event.preventDefault();
-        if (!loading)
-          seek((media.current?.currentTime || 0) + (event.key === 'ArrowLeft' ? -10 : 10), false);
+        keyboard.current = true;
+        setPointerOnControls(false);
+        seek((media.current?.currentTime || 0) + (event.key === 'ArrowLeft' ? -10 : 10));
       }
     },
     [loading, media, seek, togglePlay]
@@ -438,6 +469,7 @@ export const VideoControls: FC<TVideoControlsProps> = ({
         return;
       }
       if (
+        !target?.matches('[data-tv-timeline]') &&
         target?.closest(
           'input,select,textarea,[role=combobox],[contenteditable]:not([contenteditable=false]),[role=textbox]'
         )
@@ -458,6 +490,7 @@ export const VideoControls: FC<TVideoControlsProps> = ({
       const key = physical[event.code] || event.key.toLowerCase();
       if (key === ' ' && target?.closest('button,a')) return;
       if (![' ', 'k', 'j', 'l', 'm', 'f'].includes(key)) return;
+      if ((key === 'j' || key === 'l') && menuElement.current) return;
       event.preventDefault();
       if (event.repeat && [' ', 'k', 'm', 'f'].includes(key)) return;
       if (key === ' ' || key === 'k') togglePlay();
@@ -474,9 +507,9 @@ export const VideoControls: FC<TVideoControlsProps> = ({
   const activatePointer = useCallback(
     (event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
       keyboard.current = false;
-      if (!(event.target as HTMLElement).closest('.video-hit-area')) wake();
+      if (!tv && !(event.target as HTMLElement).closest('.video-hit-area')) wake();
     },
-    [wake]
+    [tv, wake]
   );
 
   const activateKeyboard: JSX.KeyboardEventHandler<HTMLDivElement> = event => {
@@ -489,7 +522,9 @@ export const VideoControls: FC<TVideoControlsProps> = ({
     )
       return;
     keyboard.current = true;
+    setPointerOnControls(false);
     if (event.key === 'Tab') wake();
+    else if (visible) setActivity(value => value + 1);
     const target = event.target as HTMLElement;
     const surface = target === controls.current;
     const timeline = target.matches('.video-timeline input');
@@ -501,12 +536,7 @@ export const VideoControls: FC<TVideoControlsProps> = ({
       const buttons = keyboardTargets(toolbar);
       const next = buttons[buttons.indexOf(target) + (event.key === 'ArrowRight' ? 1 : -1)];
       if (next) focusTarget(next);
-    } else if (timeline && horizontal) {
-      event.preventDefault();
-      const video = media.current;
-      if (target.hasAttribute('data-tv-adjusting') && video && !loading && !failed)
-        seek(video.currentTime + (event.key === 'ArrowLeft' ? -10 : 10));
-    } else if (surface && (horizontal || event.key === 'Enter')) {
+    } else if ((timeline && horizontal) || (surface && (horizontal || event.key === 'Enter'))) {
       surfaceKey(event);
     } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
       const root = controls.current;
@@ -521,7 +551,7 @@ export const VideoControls: FC<TVideoControlsProps> = ({
           return;
         }
         if (toolbar) tvToolbarFocus.current = target;
-        const seekBar = root?.querySelector<HTMLElement>('.video-timeline input:not(:disabled)');
+        const seekBar = timelineControl(root);
         const header = root?.querySelector<HTMLElement>('.video-top-actions button');
         const play = root?.querySelector<HTMLElement>('.video-toolbar button');
         const last = tvToolbarFocus.current;
@@ -536,10 +566,7 @@ export const VideoControls: FC<TVideoControlsProps> = ({
       }
       event.preventDefault();
       if (visible) {
-        const timelineButton =
-          up &&
-          (skipButton.current ||
-            root?.querySelector<HTMLElement>('.video-timeline input:not(:disabled)'));
+        const timelineButton = up && (skipButton.current || timelineControl(root));
         const button = timelineButton || root?.querySelector<HTMLElement>('.video-toolbar button');
         if (button) focusTarget(button);
       } else {

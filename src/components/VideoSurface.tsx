@@ -37,6 +37,7 @@ export const STREAM_STALL_TIMEOUT_MS = 20000;
 export const STREAM_ERROR_DELAY_MS = 1500;
 // Alloha's relay expires after three idle minutes. Refresh before that boundary.
 export const STREAM_RESUME_REFRESH_MS = 120000;
+const AUTO_SKIP_DELAY_MS = 3000;
 
 export type TVideoSurfaceProps = {
   stream: Stream;
@@ -177,6 +178,7 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
   const [position, setPosition] = useState(start),
     [discovered, setDiscovered] = useState<SkipMarkers>({});
   const [notice, setNotice] = useState('');
+  const [skipStart, setSkipStart] = useState<{ key: string; position: number }>();
   const [completed, setCompleted] = useState(false),
     [playing, setPlaying] = useState(false),
     [seeking, setSeeking] = useState(false),
@@ -334,6 +336,7 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
   useLayoutEffect(() => {
     saved.current = { time: start, playing: autoplay };
     skipped.current.clear();
+    setSkipStart(undefined);
     completion.current = false;
     setCompleted(false);
     setCancelledNext(false);
@@ -554,6 +557,7 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
       } catch {
         return;
       }
+      if (!automatic) video.dispatchEvent(new Event('yumiwatch:manual-seek'));
       setNotice(marker.kind === 'opening' ? 'Опенинг пропущен' : 'Титры пропущены');
       emit(
         'skip',
@@ -597,6 +601,7 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
       let crossedCredits = false;
       let advancing = false;
       if (event.type === 'seeking' || event.type === 'seeked' || video.seeking) {
+        setSkipStart(undefined);
         naturalPosition = undefined;
         lastAdvancingAt = 0;
       } else if (event.type === 'timeupdate' && !video.paused && ready && !video.error) {
@@ -790,15 +795,22 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
 
   const marker = activeSkip(rules.current.skips, position, media.current?.duration);
   const skipKey = marker ? `${marker.kind}:${marker.time}:${marker.length}` : '';
-  const autoSkip =
+  const canAutoSkip =
     !!marker &&
     !completed &&
     !loading &&
     !error &&
-    playing &&
     !seeking &&
     (marker.kind === 'opening' ? autoOpening : autoEnding) &&
     !skipped.current.has(skipKey);
+  const autoSkip = canAutoSkip && skipStart?.key === skipKey ? skipStart : undefined;
+  useLayoutEffect(() => {
+    if (!canAutoSkip) {
+      if (skipStart) setSkipStart(undefined);
+    } else if (playing && skipStart?.key !== skipKey) {
+      setSkipStart({ key: skipKey, position });
+    }
+  }, [canAutoSkip, playing, skipKey, position, skipStart]);
   const nextAction = completed && autoNext && !!next && !cancelledNext;
 
   const cancelNext = useCallback(() => setCancelledNext(true), []);
@@ -963,6 +975,10 @@ export const VideoSurface: FC<TVideoSurfaceProps> = ({
           key={`${identity}:${skipKey}`}
           background={background}
           label={marker!.kind === 'opening' ? 'Пропуск опенинга' : 'Пропуск титров'}
+          videoClock={{
+            playing,
+            remainingMs: AUTO_SKIP_DELAY_MS - Math.max(0, position - autoSkip.position) * 1000,
+          }}
           onCancel={cancelSkip}
           onNow={skipNow}
           onComplete={skipAutomatically}

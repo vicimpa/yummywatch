@@ -3,7 +3,6 @@ import { chooseOption } from './dropdown-actions';
 import { useDiscordPresence } from '~/hooks/useDiscordPresence';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
-import { AUTO_ACTION_DELAY_MS } from '~/components/AutoActionCountdown';
 import { Player } from '~/components/Player';
 import { STREAM_RESUME_REFRESH_MS } from '~/components/VideoSurface';
 import { resolveStream } from '~/lib/streams';
@@ -1419,9 +1418,8 @@ describe('our player mode', () => {
     Object.defineProperty(media, 'paused', { value: false, configurable: true });
     fireEvent.playing(media);
     expect(media.currentTime).toBe(20);
-    act(() => {
-      vi.advanceTimersByTime(AUTO_ACTION_DELAY_MS);
-    });
+    media.currentTime = 23;
+    fireEvent.timeUpdate(media);
     expect(media.currentTime).toBe(105);
     vi.useRealTimers();
     fireEvent.seeked(media);
@@ -1435,7 +1433,7 @@ describe('our player mode', () => {
     );
     expect(onPlayback.mock.calls.find(([event]) => event.reason === 'skip')?.[0]).toMatchObject({
       playback: { videoId: actual.video_id, provider: 'Alloha', position: 105 },
-      skip: { kind: 'opening', from: 20, to: 105, automatic: true },
+      skip: { kind: 'opening', from: 23, to: 105, automatic: true },
     });
     media.currentTime = 20;
     fireEvent.timeUpdate(media);
@@ -1444,9 +1442,8 @@ describe('our player mode', () => {
     vi.useFakeTimers();
     media.currentTime = 1210;
     fireEvent.timeUpdate(media);
-    act(() => {
-      vi.advanceTimersByTime(AUTO_ACTION_DELAY_MS);
-    });
+    media.currentTime = 1213;
+    fireEvent.timeUpdate(media);
     expect(media.currentTime).toBe(1290);
     vi.useRealTimers();
     fireEvent.seeked(media);

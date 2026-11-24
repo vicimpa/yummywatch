@@ -42,6 +42,9 @@ type Snapshot = {
   buffered: number;
 };
 
+const SEEK_POSITION_TOLERANCE = 0.25;
+const UNCONFIRMED_SEEK_TIMEOUT_MS = 1500;
+
 const invoke = <T>(request: Record<string, unknown>) =>
   desktopInvoke<T>('native_video', { request });
 
@@ -94,6 +97,7 @@ export class NativePlayback extends EventTarget implements PlaybackMedia {
   private appliedUpscale?: UpscaleOptions;
   private bufferEnd = 0;
   private controls: Controls = {};
+  private pendingSeek?: { target: number; idleSince?: number };
   private geometry?: Geometry;
   private buffering = false;
   private timer?: ReturnType<typeof setTimeout>;
@@ -142,7 +146,9 @@ export class NativePlayback extends EventTarget implements PlaybackMedia {
 
   set currentTime(value: number) {
     if (!Number.isFinite(value)) return;
-    this.controls.seconds = this.position = Math.max(0, value);
+    const target = Math.max(0, value);
+    this.controls.seconds = this.position = target;
+    this.pendingSeek = { target };
     this.ended = false;
     this.seeking = true;
     this.emit('seeking');
@@ -308,16 +314,33 @@ export class NativePlayback extends EventTarget implements PlaybackMedia {
       this.bufferEnd = snapshot.buffered;
       this.duration = snapshot.duration || NaN;
       if (this.controls.seconds === undefined) {
-        if (!seeking || !snapshot.seeking) this.position = snapshot.position;
-        this.seeking = snapshot.seeking;
+        const pending = this.pendingSeek;
+        // A new seek can still be queued when a snapshot reports an older position as settled.
+        if (pending) {
+          if (!snapshot.ready || snapshot.seeking) pending.idleSince = undefined;
+          else if (
+            Math.abs(snapshot.position - pending.target) <= SEEK_POSITION_TOLERANCE ||
+            (snapshot.ended && snapshot.duration > 0 && pending.target >= snapshot.duration)
+          )
+            this.pendingSeek = undefined;
+          else if (snapshot.buffering) pending.idleSince = undefined;
+          else {
+            const now = performance.now();
+            pending.idleSince ??= now;
+            if (now - pending.idleSince >= UNCONFIRMED_SEEK_TIMEOUT_MS)
+              this.pendingSeek = undefined;
+          }
+        }
+        if (!this.pendingSeek && (!seeking || !snapshot.seeking)) this.position = snapshot.position;
+        this.seeking = snapshot.seeking || !!this.pendingSeek;
         if (seeking && !this.seeking) this.emit('seeked');
       }
       if (initial) {
         this.emit('loadedmetadata');
         this.emit('loadeddata');
       }
-      if (snapshot.ended && this.controls.seconds === undefined) {
-        if (!this.ended) {
+      if (snapshot.ended) {
+        if (!this.ended && !this.seeking && this.controls.seconds === undefined) {
           this.ended = this.paused = true;
           this.emit('ended');
         }

@@ -2252,6 +2252,10 @@
   visibility: hidden;
   pointer-events: none;
 }
+.video-controls.is-visible .video-chrome {
+  /* The timeline must accept focus as soon as the controls open. */
+  transition-property: opacity;
+}
 .controls-idle,
 .controls-idle .video-hit-area {
   cursor: none;

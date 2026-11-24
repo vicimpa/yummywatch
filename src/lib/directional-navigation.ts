@@ -424,11 +424,6 @@ export function installDirectionalNavigation(goBack: () => void, keyboardInterac
       void exitFullscreen().catch(() => notify('Не удалось выйти из полного экрана.'));
       return;
     }
-    const player = mainControl(`${playerSelector}[data-tv-controls-open=true]`);
-    if (player) {
-      player.dispatchEvent(new Event('yumiwatch:tv-dismiss'));
-      return;
-    }
     if (!tv || navigation.value.canBack || (location.hash && location.hash !== '#/')) goBack();
     else if (hardware && isDesktop()) void exit(0).catch(() => {});
   };
@@ -539,8 +534,6 @@ export function installDirectionalNavigation(goBack: () => void, keyboardInterac
       if (editor && !imeOpen()) endEdit();
       if (range) {
         if (range === document.activeElement && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
-          // Playback uses the active media time, which can be ahead of the rendered input.
-          if (range.hasAttribute('data-tv-timeline')) return;
           event.preventDefault();
           event.stopPropagation();
           changeRange(range, event.key === 'ArrowRight' ? 1 : -1);
@@ -580,7 +573,7 @@ export function installDirectionalNavigation(goBack: () => void, keyboardInterac
     if (active instanceof HTMLInputElement && active.type === 'range') {
       event.preventDefault();
       event.stopPropagation();
-      toggleAdjustment(active);
+      if (!active.hasAttribute('data-tv-timeline')) toggleAdjustment(active);
       return;
     }
     if (

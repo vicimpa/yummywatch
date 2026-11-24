@@ -225,21 +225,20 @@ describe('custom playback controls', () => {
     expect(controls.classList.contains('is-hidden')).toBe(true);
   });
   it.each(['ArrowUp', 'ArrowDown'])(
-    'keeps controls open after %s until the mouse takes over',
+    'auto-hides after %s even with focus and a stationary pointer on the controls',
     key => {
       const { controls, playing } = setup();
       playing(false);
+      fireEvent.pointerMove(screen.getByRole('slider', { name: 'Позиция воспроизведения' }));
       document.documentElement.dataset.inputMode = 'keyboard';
       (controls as HTMLElement).focus();
       fireEvent.keyDown(controls, { key });
       const focused = document.activeElement;
       expect(controls.contains(focused)).toBe(true);
       expect(focused).not.toBe(controls);
+      fireEvent.pointerOver(focused!);
       idle();
-      expect(document.activeElement).toBe(focused);
-      expect(controls.classList.contains('is-visible')).toBe(true);
-      fireEvent.pointerMove(controls);
-      idle();
+      expect(document.activeElement).toBe(controls);
       expect(controls.classList.contains('is-hidden')).toBe(true);
     }
   );
@@ -476,29 +475,37 @@ describe('custom playback controls', () => {
       const { controls, video, playing } = setup();
       playing(false);
       (controls as HTMLElement).focus();
+      idle();
       fireEvent.keyDown(controls, { key: 'Enter' });
       expect(video.pause).toHaveBeenCalledOnce();
+      expect(controls.classList.contains('is-hidden')).toBe(true);
       fireEvent.keyDown(controls, { key: 'ArrowRight' });
       expect(video.currentTime).toBe(52);
-      fireEvent.keyDown(controls, { key: 'ArrowDown' });
+
+      const timeline = screen.getByRole('slider', { name: 'Позиция воспроизведения' });
+      expect(document.activeElement).toBe(timeline);
+      fireEvent.keyDown(timeline, { key: 'ArrowDown' });
 
       const pause = screen.getByRole('button', { name: 'Пауза' });
       expect(document.activeElement).toBe(pause);
       expect(controls.classList.contains('is-visible')).toBe(true);
-      idle();
-      expect(document.activeElement).toBe(pause);
-
       fireEvent.keyDown(pause, { key: 'ArrowUp' });
-      const timeline = screen.getByRole('slider', { name: 'Позиция воспроизведения' });
       expect(document.activeElement).toBe(timeline);
       fireEvent.keyDown(timeline, { key: 'ArrowRight' });
-      expect(video.currentTime).toBe(52);
-      fireEvent.keyDown(timeline, { key: 'ArrowDown' });
-      expect(document.activeElement).toBe(pause);
+      expect(video.currentTime).toBe(62);
 
-      fireEvent(controls, new Event('yumiwatch:tv-dismiss'));
+      idle();
       expect(document.activeElement).toBe(controls);
       expect(controls.classList.contains('is-hidden')).toBe(true);
+
+      fireEvent.keyDown(controls, { key: 'ArrowLeft' });
+      expect(video.currentTime).toBe(52);
+      expect(document.activeElement).toBe(timeline);
+
+      (controls as HTMLElement).focus();
+      fireEvent.keyDown(controls, { key: 'ArrowLeft' });
+      expect(video.currentTime).toBe(42);
+      expect(document.activeElement).toBe(timeline);
     }
   );
   it('seeks from the live media position on TV even before the timeline catches up', () => {
@@ -528,14 +535,40 @@ describe('custom playback controls', () => {
     expect(timeline.value).toBe('42');
 
     fireEvent.keyDown(timeline, { key: 'ArrowLeft' });
-    expect(video.currentTime).toBe(150);
+    expect(video.currentTime).toBe(140);
     fireEvent.keyDown(timeline, { key: 'Enter' });
     fireEvent.keyUp(timeline, { key: 'Enter' });
-    fireEvent.keyDown(timeline, { key: 'ArrowLeft' });
+    expect(timeline.hasAttribute('data-tv-adjusting')).toBe(false);
     fireEvent.keyDown(timeline, { key: 'ArrowLeft' });
     expect(video.currentTime).toBe(130);
     fireEvent.keyDown(timeline, { key: 'ArrowRight' });
     expect(video.currentTime).toBe(140);
+  });
+  it.each(['Escape', 'BrowserBack'])('uses %s to go back from an open player toolbar', key => {
+    document.documentElement.dataset.tv = 'true';
+    const originalURL = location.href;
+    history.replaceState(null, '', '#/anime/1?view=watch');
+    const back = vi.fn();
+    try {
+      const { container } = render(
+        <>
+          <InterfaceEffects onBack={back} />
+          <main id="main">
+            <Harness />
+          </main>
+        </>
+      );
+      const player = container.querySelector<HTMLElement>('.video-controls')!;
+      player.focus();
+      fireEvent.keyDown(player, { key: 'ArrowDown' });
+      expect(player.classList.contains('is-visible')).toBe(true);
+
+      fireEvent.keyDown(document.activeElement!, { key });
+      expect(back).toHaveBeenCalledOnce();
+      expect(player.classList.contains('is-visible')).toBe(true);
+    } finally {
+      history.replaceState(null, '', originalURL);
+    }
   });
   it('lets the TV remote focus and activate a visible skip button', () => {
     document.documentElement.dataset.tv = 'true';
@@ -578,7 +611,7 @@ describe('custom playback controls', () => {
     fireEvent.keyDown(speed, { key: 'ArrowUp' });
     expect(document.activeElement).toBe(quality);
   });
-  it('uses the hardware playback commands without moving TV focus', () => {
+  it('focuses the timeline for hardware rewind and forward while keeping pause in place', () => {
     document.documentElement.dataset.tv = 'true';
     const { controls, video, playing } = setup();
     playing(false);
@@ -586,10 +619,19 @@ describe('custom playback controls', () => {
     const dispatch = (detail: string) =>
       fireEvent(window, new CustomEvent('yumiwatch:tv-media', { detail }));
     dispatch('pause');
-    dispatch('rewind');
     expect(video.pause).toHaveBeenCalledOnce();
-    expect(video.currentTime).toBe(32);
     expect(document.activeElement).toBe(controls);
+
+    dispatch('rewind');
+    const timeline = screen.getByRole('slider', { name: 'Позиция воспроизведения' });
+    expect(video.currentTime).toBe(32);
+    expect(document.activeElement).toBe(timeline);
+
+    fireEvent.keyDown(timeline, { key: 'ArrowDown' });
+    expect(document.activeElement).not.toBe(timeline);
+    dispatch('forward');
+    expect(video.currentTime).toBe(42);
+    expect(document.activeElement).toBe(timeline);
   });
   it('lets the remote leave an unavailable episode with the hardware episode keys', () => {
     document.documentElement.dataset.tv = 'true';
@@ -629,8 +671,13 @@ describe('custom playback controls', () => {
       fireEvent.keyDown(document.activeElement!, { key: 'ArrowRight' });
       expect(document.activeElement).toBe(episodes === 2 ? volume : mute);
       expect(video.currentTime).toBe(0);
-      const activePlayer = container.querySelector('.video-controls')!;
-      fireEvent(activePlayer, new Event('yumiwatch:tv-dismiss'));
+      Object.defineProperty(video, 'paused', { value: false });
+      Object.defineProperty(video, 'readyState', { value: 4 });
+      const newPlayer = container.querySelector('.video-controls')!;
+      expect(container.querySelector('video')).toBe(video);
+      fireEvent.playing(video);
+      idle();
+      expect(newPlayer.classList.contains('is-hidden')).toBe(true);
       rerender(<Harness episodes={episodes} revision={2} />);
       expect(container.querySelector('.video-controls')?.classList.contains('is-hidden')).toBe(
         true
@@ -654,15 +701,27 @@ describe('custom playback controls', () => {
   });
   it('handles global shortcuts without seeking while editing settings', () => {
     const { video } = setup();
+    fireEvent.loadedMetadata(video);
+    const timeline = screen.getByRole('slider', { name: 'Позиция воспроизведения' });
 
     fireEvent.keyDown(document.body, { key: 'д', code: 'KeyL' });
     expect(video.currentTime).toBe(52);
-    fireEvent.keyDown(document.body, { key: 'j' });
+    expect(document.activeElement).toBe(timeline);
+    fireEvent.keyDown(timeline, { key: 'j' });
     expect(video.currentTime).toBe(42);
-    fireEvent.keyDown(document.body, { key: 'm' });
+    fireEvent.keyDown(timeline, { key: 'm' });
     expect(video.muted).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Настройки плеера' }));
     fireEvent.keyDown(screen.getByRole('combobox', { name: 'Качество' }), { key: 'l' });
     expect(video.currentTime).toBe(42);
+  });
+  it('focuses the timeline when the user changes the range with the pointer', () => {
+    const { video } = setup();
+    fireEvent.loadedMetadata(video);
+    const timeline = screen.getByRole('slider', { name: 'Позиция воспроизведения' });
+    screen.getByRole('button', { name: 'Настройки плеера' }).focus();
+    fireEvent.input(timeline, { target: { value: '100' } });
+    expect(video.currentTime).toBe(100);
+    expect(document.activeElement).toBe(timeline);
   });
 });
