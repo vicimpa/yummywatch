@@ -36,7 +36,7 @@ adb shell getprop ro.product.cpu.abilist
 Подставь имя скачанного APK. Ключ `-r` обновляет установленный YummyWatch с той же подписью и сохраняет данные приложения.
 
 ```sh
-adb install -r YummyWatch-0.0.10-AndroidTV-arm64-v8a.apk
+adb install -r YummyWatch-0.0.11-AndroidTV-arm64-v8a.apk
 ```
 
 После сообщения `Success` открой YummyWatch в списке приложений на телевизоре. Если ADB сообщает `INSTALL_FAILED_NO_MATCHING_ABIS`, проверь архитектуру. Если появляется `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, установленная сборка подписана другим ключом. Это возможно после тестового APK. Удаление старого приложения стирает его локальные данные, поэтому сначала сохрани нужные данные. После установки отключи отладку на телевизоре. [Команды установки ADB](https://developer.android.com/tools/adb#move)
