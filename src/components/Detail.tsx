@@ -167,9 +167,10 @@ export const Detail: FC<TDetailProps> = ({
       position: oldPosition,
       updatedAt: 0,
     });
-  const history = isContinueHidden(Number(id))
-    ? undefined
-    : entries.sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const continueHidden = isContinueHidden(Number(id));
+  const history = continueHidden ? undefined : entries.sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const resumePending =
+    !!session && !continueHidden && !history && library.loading && navigator.onLine !== false;
   const readyQueue = !watching && downloadsAvailable() ? downloads.value : undefined;
   const availableVideos = videos.value?.data || [];
   const resume = readyQueue && resumeVideo(availableVideos, history);
@@ -185,6 +186,7 @@ export const Detail: FC<TDetailProps> = ({
   );
   const useLocalRoute =
     localResume &&
+    !resumePending &&
     (navigator.onLine === false ||
       !resume ||
       voiceKey(resume.data.dubbing) !== voiceKey(localResume.voice) ||
@@ -422,6 +424,7 @@ export const Detail: FC<TDetailProps> = ({
                     anime={anime}
                     offline={offline}
                     history={history}
+                    resumePending={resumePending}
                     startPlaying={params.has('play')}
                     newWatch={params.has('start')}
                     preferredVoice={local?.voice || params.get('voice') || undefined}

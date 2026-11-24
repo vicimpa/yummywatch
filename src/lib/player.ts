@@ -59,17 +59,18 @@ export const canStartAnime = (anime: Anime) =>
   anime.anime_status?.alias !== 'announcement' || (anime.episodes?.aired ?? 0) > 0;
 
 export function resumeVideo(videos: Video[], entry?: WatchEntry) {
-  const latest = [...videos]
-    .filter(video => video.watched?.date)
-    .sort((a, b) => (b.watched?.date || 0) - (a.watched?.date || 0))[0];
+  const byWatchDate = (a: Video, b: Video) => (b.watched?.date || 0) - (a.watched?.date || 0);
+  const latest = [...videos].filter(video => video.watched?.date).sort(byWatchDate)[0];
 
   if (latest && (latest.watched?.date || 0) * 1000 > (entry?.updatedAt || 0)) return latest;
+  if (!entry) return videos[0];
+
+  const sameEpisode = videos.filter(video => video.number === entry.episode).sort(byWatchDate);
 
   return (
-    videos.find(v => v.video_id === entry?.videoId) ||
-    videos
-      .filter(v => v.number === entry?.episode)
-      .sort((a, b) => (b.watched?.date || 0) - (a.watched?.date || 0))[0] ||
+    videos.find(video => video.video_id === entry.videoId) ||
+    sameEpisode.find(video => watchMatchesVideo(entry, video)) ||
+    sameEpisode[0] ||
     videos[0]
   );
 }

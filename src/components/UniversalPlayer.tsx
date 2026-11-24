@@ -110,15 +110,7 @@ function sameSnapshot(previous: PlaybackSnapshot | undefined, next: PlaybackSnap
   );
 }
 
-function resumeSelection(
-  videos: Video[],
-  history?: WatchEntry,
-  preferredVoice?: string,
-  ranking = false
-) {
-  if (ranking && !history && !preferredVoice) {
-    return rankedStart(videos) || firstEpisode(videos);
-  }
+function resumeSelection(videos: Video[], history?: WatchEntry, preferredVoice?: string) {
   const preferred = preferredVoice
     ? videos.filter(video => voiceKey(video.data.dubbing) === voiceKey(preferredVoice))
     : videos;
@@ -130,6 +122,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
   anime,
   offline,
   history,
+  resumePending,
   onCheckpoint,
   onPlayback,
   onSelectPlayer,
@@ -163,28 +156,22 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
         : peekAnimeVideos(anime.anime_id)
   );
   const all = resource.value?.data || EMPTY_VIDEOS;
-  const initial = useMemo(
-    () => resumeSelection(all, history, preferredVoice, newWatch && !preferredEpisode && !offline),
-    [all, history, preferredVoice]
-  );
-  const [voice, setVoice] = useState(() => initial?.data.dubbing || '');
-  const [episode, setEpisode] = useState(
-    () =>
-      all.find(
-        video =>
-          video.number === preferredEpisode &&
-          voiceKey(video.data.dubbing) === voiceKey(initial?.data.dubbing || '')
-      )?.number ||
-      initial?.number ||
-      ''
-  );
-  const voiceChoice = useRef<VoiceChoice>(
-    preferredVoice && !offline
-      ? 'explicit'
-      : newWatch && !history && !preferredEpisode && rankedStart(all)
-        ? 'ranked'
-        : 'default'
-  );
+  const selectionScope = `${anime.anime_id}:${session?.token || ''}:${preferredVoice || ''}:${preferredEpisode || ''}`;
+  const [selection, setSelection] = useState<{ scope: string; voice: string; episode: string }>();
+  const chosen = selection?.scope === selectionScope ? selection : undefined;
+  const voice = chosen?.voice ?? '';
+  const episode = chosen?.episode ?? '';
+  const checkingAccount = !offline && !!session && !session.verified;
+  // An implicit resume must settle before the first stream can publish new progress.
+  const waitingForResume =
+    !chosen &&
+    !!session &&
+    !offline &&
+    !preferredVoice &&
+    !preferredEpisode &&
+    !resource.error &&
+    (resumePending || (navigator.onLine !== false && resource.refreshing));
+  const voiceChoice = useRef<VoiceChoice>('default');
   const voiceVote = useRef<() => boolean>(voiceVoteOnce());
   const playbackRun = useMemo(() => Date.now(), [anime.anime_id, session?.token, episode]);
   const [overlay, setOverlay] = useState<'voice' | 'episodes' | 'player' | null>(null);
@@ -214,7 +201,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
   const [resumeAutoplay, setResumeAutoplay] = useState(false);
 
   useEffect(() => {
-    if (!history?.playing) return;
+    if (waitingForResume || !history?.playing) return;
 
     let cancelled = false;
 
@@ -225,7 +212,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [anime.anime_id, session?.token]);
+  }, [anime.anime_id, session?.token, waitingForResume]);
 
   const [playback, setPlayback] = useState<PlaybackSnapshot>();
   const localMedia = useRef<PlaybackMedia>(null);
@@ -245,48 +232,53 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
 
   callbacks.current = { onCheckpoint, onPlayback };
 
-  const selectionScope = `${anime.anime_id}:${session?.token || ''}:${preferredVoice || ''}:${preferredEpisode || ''}`;
-  const initialized = useRef(selectionScope);
-
   useEffect(() => {
-    if (!all.length) return;
+    if (checkingAccount || waitingForResume || !all.length) return;
     if (
-      initialized.current === selectionScope &&
+      chosen &&
       all.some(
-        video => video.number === episode && voiceKey(video.data.dubbing) === voiceKey(voice)
+        video =>
+          video.number === chosen.episode && voiceKey(video.data.dubbing) === voiceKey(chosen.voice)
       )
     )
       return;
-    initialized.current = selectionScope;
 
-    const resumed = resumeSelection(
-      all,
-      history,
-      preferredVoice,
-      newWatch && !preferredEpisode && !offline
-    );
-    voiceChoice.current =
-      preferredVoice && !offline
-        ? 'explicit'
-        : newWatch && !history && !preferredEpisode && !offline && rankedStart(all)
-          ? 'ranked'
-          : 'default';
+    const useRanking = newWatch && !history && !preferredVoice && !preferredEpisode && !offline;
+    const ranked = useRanking ? rankedStart(all) : undefined;
+    const resumed = useRanking
+      ? ranked || firstEpisode(all)
+      : resumeSelection(all, history, preferredVoice);
+    if (!resumed) return;
+    voiceChoice.current = preferredVoice && !offline ? 'explicit' : ranked ? 'ranked' : 'default';
     if (voiceChoice.current === 'explicit') {
       voiceVote.current = voiceVoteOnce();
     }
 
-    setVoice(resumed.data.dubbing);
-    setEpisode(
-      all.find(
-        video =>
-          video.number === preferredEpisode &&
-          voiceKey(video.data.dubbing) === voiceKey(resumed.data.dubbing)
-      )?.number || resumed.number
+    const requested = all.find(
+      video =>
+        video.number === preferredEpisode &&
+        voiceKey(video.data.dubbing) === voiceKey(resumed.data.dubbing)
     );
-  }, [resource.value, preferredVoice, preferredEpisode, selectionScope]);
+    setSelection({
+      scope: selectionScope,
+      voice: resumed.data.dubbing,
+      episode: requested?.number || resumed.number,
+    });
+  }, [
+    all,
+    checkingAccount,
+    chosen,
+    history,
+    newWatch,
+    offline,
+    preferredEpisode,
+    preferredVoice,
+    selectionScope,
+    waitingForResume,
+  ]);
 
   const videos = useMemo(() => voiceVideos(all, voice), [all, voice]);
-  const current = videos.find(video => video.number === episode) || videos[0];
+  const current = chosen && videos.find(video => video.number === episode);
   const index = current ? videos.findIndex(video => video.number === current.number) : -1;
   const candidates = useMemo(
     () =>
@@ -742,8 +734,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       recoveryMedia.current = undefined;
       setFailedSources({ scope: '', ids: EMPTY_IDS, kodikReserves: EMPTY_RESERVES });
       setSourceChoice(undefined);
-      setEpisode(number);
-      setVoice(nextVoice);
+      setSelection({ scope: selectionScope, episode: number, voice: nextVoice });
       setOverlay(null);
       if (panel === 'episodes') onPanelChange?.(null);
     },
@@ -920,7 +911,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
 
   const updateMedia = useCallback(
     (event: MediaUpdate, playingStream: Stream) => {
-      if (!watch) return;
+      if (!watch || !active) return;
       if (event.reason === 'loadedmetadata' && recoveryMedia.current && media.current) {
         const saved = recoveryMedia.current;
 
@@ -1070,8 +1061,8 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
       <button onClick={retrySync}>Сохранено локально · повторить синхронизацию</button>
     ) : null;
 
-  const checkingAccount = !offline && !!session && !session.verified;
-  const loadingEpisodes = resource.loading || (all.length > 0 && !current);
+  const loadingEpisodes =
+    resource.loading || (!resource.error && (waitingForResume || (all.length > 0 && !current)));
   const hasSurface = !!(
     selected &&
     current &&
@@ -1128,7 +1119,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
         {pipButton}
       </>
     );
-  if (!all.length)
+  if (!current)
     return (
       <>
         <Empty title="Серии пока не появились">Попробуй вернуться позже.</Empty>
@@ -1157,7 +1148,7 @@ export const UniversalPlayer: FC<TPlayerProps> = ({
           </div>
         )}
         <div class="universal-stage" ref={fullscreenFrame}>
-          {selected && current && watch ? (
+          {selected && active && watch ? (
             <VideoSurface
               key={active.video_id}
               fullscreenFrame={fullscreenContainer || fullscreenFrame}

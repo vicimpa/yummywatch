@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { Detail } from '~/components/Detail';
 import { InterfaceEffects } from '~/components/InterfaceEffects';
+import { animeVideos } from '~/lib/api';
+import * as downloadLibrary from '~/lib/downloads';
+import { resetAccountLibrary, syncLibrary } from '~/lib/library';
 import { clearSession, saveSession } from '~/lib/session';
 import { resolveStream } from '~/lib/streams';
 import { savePlaybackSettings } from '~/lib/playback-settings';
@@ -93,6 +96,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  downloadLibrary.downloads.value = undefined;
   clearSession();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -300,6 +304,101 @@ describe('anime media center screens', () => {
       'Просмотрено 00:30'
     );
   });
+  it.each(['original source', 'replacement source'])(
+    'waits for account history to restore the %s and saved time on another device',
+    async source => {
+      resetAccountLibrary();
+      saveSession({
+        token: `cross-device-resume-${source}`,
+        user: { id: 42, nickname: 'Viewer' },
+        verified: true,
+        remember: false,
+        refreshedAt: Date.now(),
+      });
+      const watched = video('2', 'AniDub', 2);
+      const original = source === 'original source' ? watched : video('2', 'AniDub');
+      const catalog = [current, video('2'), watched];
+      vi.spyOn(downloadLibrary, 'downloadsAvailable').mockReturnValue(true);
+      downloadLibrary.downloads.value = [
+        {
+          id: 'a'.repeat(32),
+          animeId: anime.anime_id,
+          title: anime.title,
+          episode: '1',
+          voice: current.data.dubbing,
+          quality: 480,
+          candidates: [],
+          status: 'ready',
+          done: 1,
+          total: 1,
+          stream: {
+            provider: 'Kodik',
+            videoId: video('1', current.data.dubbing, 2).video_id,
+            quality: 480,
+            entry: `downloads/${'a'.repeat(32)}/index.m3u8`,
+          },
+        },
+      ];
+      const reply = (response: unknown) => new Response(JSON.stringify({ response }));
+      let finishHistory!: (response: Response) => void;
+      const remoteHistory = new Promise<Response>(resolve => {
+        finishHistory = resolve;
+      });
+      vi.mocked(fetch).mockImplementation(async url => {
+        const path = new URL(String(url)).pathname;
+        if (path === '/video/watch-history') return remoteHistory;
+        return reply(path === '/anime/10531' ? sample : path.endsWith('/videos') ? catalog : []);
+      });
+      vi.mocked(resolveStream).mockClear();
+      await animeVideos(anime.anime_id);
+
+      const syncing = syncLibrary();
+      const { container, rerender } = render(<Detail id="10531" />);
+      const start = await screen.findByRole('link', { name: /Начать просмотр/ });
+      const path = start.getAttribute('data-app-href');
+      expect(path).toBe('#/anime/10531?view=watch&play=1&start=1');
+      rerender(<Detail id="10531" query={path!.split('?')[1]} />);
+      await waitFor(() => expect(container.querySelector('.room-main')).toBeTruthy());
+      expect(container.querySelector('.room-main .player-skeleton')).toBeTruthy();
+      expect(resolveStream).not.toHaveBeenCalled();
+
+      await act(async () => {
+        finishHistory(
+          reply([
+            {
+              ...sample,
+              video_id: original.video_id,
+              ...(original !== watched && { data: original.data }),
+              ep_title: '2',
+              end_time: 297,
+              duration: 1400,
+              date: 100,
+            },
+          ])
+        );
+        await syncing;
+      });
+      await waitFor(() =>
+        expect(container.querySelector('video')?.getAttribute('src')).toContain('/2.mp4')
+      );
+      expect(
+        vi.mocked(resolveStream).mock.calls.map(([videos]) => videos.map(v => v.video_id))
+      ).toEqual([[watched.video_id]]);
+      expect(container.querySelector('video')?.currentTime).toBe(297);
+
+      rerender(<Detail id="10531" />);
+      const resume = await screen.findByRole('link', {
+        name: /Продолжить просмотр.*Серия 2 · 04:57/,
+      });
+      const resumePath = resume.getAttribute('data-app-href');
+      expect(resumePath).toBe('#/anime/10531?view=watch&play=1');
+      rerender(<Detail id="10531" query={resumePath!.split('?')[1]} />);
+      await waitFor(() => expect(container.querySelector('video')?.currentTime).toBe(297));
+      expect(vi.mocked(resolveStream).mock.lastCall?.[0].map(v => v.video_id)).toEqual([
+        watched.video_id,
+      ]);
+    }
+  );
   it('starts the requested episode instead of returning to a different saved episode', async () => {
     savePlaybackRecovery(
       {

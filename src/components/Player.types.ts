@@ -33,6 +33,7 @@ export type TPlayerProps = {
   anime: Anime;
   offline?: StoredPlayback;
   history?: WatchEntry;
+  resumePending?: boolean;
   onCheckpoint?: (entry: WatchEntry) => void;
   onPlayback?: (event: PlaybackReport) => void;
 };

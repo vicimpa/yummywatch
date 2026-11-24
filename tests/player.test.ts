@@ -40,6 +40,19 @@ describe('video groups and resume', () => {
     expect(resumeVideo(videos, { ...entry, videoId: 999999 })).toEqual(videos[1]);
     expect(resumeVideo(videos, { ...entry, episode: '99', videoId: 999999 })).toEqual(videos[0]);
   });
+  it('keeps the saved dubbing when the original video is no longer in the catalog', () => {
+    const original = video('2', 'AniDub');
+    const replacement = video('2', 'AniDub', 2);
+    const entry = {
+      anime,
+      episode: original.number,
+      group: groupKey(original),
+      videoId: original.video_id,
+      updatedAt: 100,
+    };
+
+    expect(resumeVideo([video('1'), video('2'), replacement], entry)).toBe(replacement);
+  });
   it('allows only HTTPS iframe sources and rejects credential URLs', () => {
     expect(playerUrl('//player.example/video')).toBe('https://player.example/video');
     for (const url of [
